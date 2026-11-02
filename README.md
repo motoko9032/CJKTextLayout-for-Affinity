@@ -3,7 +3,7 @@
 **Version:** 0.5.6  
 **Target:** Affinity by Canva desktop scripting API (SDK 3.3.x)  
 **Platform:** macOS / Windows desktop  
-**License:** MIT
+**License:** GPL 3.0
 
 ## 0.5.6 更新
 
