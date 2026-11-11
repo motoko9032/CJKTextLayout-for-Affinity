@@ -1,5 +1,5 @@
 // Affinity CJK Typography Toolkit
-// Version: 0.5.6
+// Version: 0.5.11
 // Purpose: configurable CJK typography audit and optional Yakumono compression.
 // Target: Affinity by Canva desktop scripting API (SDK 3.3.x)
 // License: MIT
@@ -32,6 +32,22 @@
 //
 // 0.5.6 fixes:
 // - exempt dash punctuation from consecutive-punctuation compression
+//
+// 0.5.7 fixes:
+// - scan text nodes on editable master-page spreads in addition to selected nodes
+//
+// 0.5.8 fixes:
+// - retry failed batch formatting commands per text node to isolate master-node failures
+//
+// 0.5.9 fixes:
+// - create text formatting selections with the node owned by the StoryInterface
+//
+// 0.5.10 fixes:
+// - build independent format commands for batch and per-node retry builders
+//
+// 0.5.11 fixes:
+// - exclude wave dash and fullwidth tilde from punctuation compression
+// - write the completion report without opening a modal alert
 
 // 0.4.7 fixes:
 // - build formatting candidates from Story.text and the node's StoryRange
@@ -83,7 +99,7 @@ const { StoryDelta } = require('/storydelta.js');
 const { DocumentCommand, CompoundCommandBuilder } = require('/commands.js');
 const { StoryRange } = require('affinity:story');
 
-const VERSION = '0.5.6';
+const VERSION = '0.5.11';
 
 // Edit these settings before running, or use one of the presets below.
 const CONFIG = {
@@ -134,6 +150,7 @@ const PUNCTUATION = new Set(Array.from(
   '！？，。；：、…‥・．，｡､〝〞〟〃々〆〜～ー‐‑‒–—―：；？！·・･「」『』【】〔〕〈〉《》「」〘〙〚〛（）［］｛｝｢｣､｡﹐﹑﹒﹔﹕﹖﹗﹙﹚﹛﹜﹝﹞﹟﹠﹡﹣﹦﹨﹩﹪﹫ﹰﹱﹲﹳﹴ﹵ﹶﹷﹸﹹﹺﹻﹼﹽﹾﹿ,.!?;:()[]{}<>'
 ));
 const DASH_PUNCTUATION = new Set(Array.from('‐‑‒–—―－'));
+const NON_COMPRESSIBLE_PUNCTUATION = new Set(Array.from('〜～'));
 const OPEN_TO_CLOSE = new Map([
   ['（', '）'], ['「', '」'], ['『', '』'], ['【', '】'],
   ['《', '》'], ['〈', '〉'], ['〔', '〕'], ['〖', '〗'],
@@ -192,6 +209,10 @@ function errorMessage(error) {
   return String(error && error.message ? error.message : error);
 }
 
+function storyIdentity(story) {
+  return story && story.handle !== undefined ? story.handle : story;
+}
+
 function getStoryText(story) {
   if (typeof story.text === 'string') return story.text;
   if (typeof story.getLength !== 'function' || typeof story.getText !== 'function') {
@@ -220,7 +241,8 @@ function isLatinOrDigit(ch) {
 function isCompressiblePunctuation(ch) {
   return PUNCTUATION.has(ch) &&
     !HAN_IDEOGRAPH.test(ch) &&
-    !DASH_PUNCTUATION.has(ch);
+    !DASH_PUNCTUATION.has(ch) &&
+    !NON_COMPRESSIBLE_PUNCTUATION.has(ch);
 }
 
 function codePoints(text) {
@@ -336,6 +358,29 @@ function getNodeStoryText(node) {
     `Story 文本长度 ${storyText.length} 与范围 [${range.begin}, ${end}) ` +
     `（长度 ${rangeLength}）不匹配。`
   );
+}
+
+function collectMasterTextNodes(doc) {
+  const spreads = doc.spreads;
+  const roots = [];
+  for (const spread of spreads.toArray()) {
+    const layers = spread.layers;
+    roots.push(...layers.toArray());
+  }
+
+  const masterNodes = [];
+  const visited = new Set();
+  while (roots.length) {
+    const node = roots.pop();
+    if (!node) continue;
+    const nodeIdentity = node.handle === undefined ? node : node.handle;
+    if (visited.has(nodeIdentity)) continue;
+    visited.add(nodeIdentity);
+
+    if (node.isTextNode && node.isMasterEditable) masterNodes.push(node);
+    roots.push(...node.children.toArray());
+  }
+  return masterNodes;
 }
 
 function findCjkLatinBoundaries(node, text, nodeRange = getNodeStoryText(node)) {
@@ -474,10 +519,11 @@ function findConsecutivePunctuationTargets(node, text, nodeRange = getNodeStoryT
 
 function collectFormattingTargets(targets, lookup, candidates, attribute, amount) {
   for (const candidate of candidates) {
-    let storyTargets = lookup.get(candidate.story);
+    const identity = storyIdentity(candidate.story);
+    let storyTargets = lookup.get(identity);
     if (!storyTargets) {
       storyTargets = new Map();
-      lookup.set(candidate.story, storyTargets);
+      lookup.set(identity, storyTargets);
     }
     const key = `${candidate.begin}:${candidate.end}:${attribute}`;
     const existing = storyTargets.get(key);
@@ -505,22 +551,38 @@ function collectResetTargets(targets, ranges) {
   }
 }
 
+function createFormattingCommand(doc, target, value) {
+  const selection = Selection.create(doc, target.node);
+  selection.addSubSelectionForNode(
+    target.node,
+    TextSelection.create([new StoryRange(target.begin, target.end)])
+  );
+  return DocumentCommand.createFormatText(
+    selection,
+    StoryDelta.createGlyphDouble(target.attribute, value)
+  );
+}
+
 function applyTypographyAdjustments(doc, targets, errors) {
   const builder = CompoundCommandBuilder.create();
   const storyLengths = new Map();
+  const nodeGroups = new Map();
   let succeeded = false;
+  let usedFallback = false;
   let resetCommandCount = 0;
   const applied = {
     [GlyphAttDoubleType.CharacterSpacing]: 0,
     [GlyphAttDoubleType.ManualKerning]: 0,
   };
+  let queuedResetCommandCount = 0;
 
   for (const target of targets) {
     try {
-      let storyLength = storyLengths.get(target.story);
+      const identity = storyIdentity(target.story);
+      let storyLength = storyLengths.get(identity);
       if (storyLength === undefined) {
         storyLength = getStoryText(target.story).length;
-        storyLengths.set(target.story, storyLength);
+        storyLengths.set(identity, storyLength);
       }
       if (!Number.isInteger(target.begin) || !Number.isInteger(target.end) ||
           target.begin < 0 || target.end <= target.begin || target.end > storyLength) {
@@ -544,33 +606,96 @@ function applyTypographyAdjustments(doc, targets, errors) {
         throw new Error('目标字距属性不是有效数值。');
       }
 
-      const selection = Selection.create(doc, target.node);
-      selection.addSubSelectionForNode(
-        target.node,
-        TextSelection.create([new StoryRange(target.begin, target.end)])
-      );
-      builder.addCommand(DocumentCommand.createFormatText(
-        selection,
-        StoryDelta.createGlyphDouble(target.attribute, value)
-      ));
-      applied[target.attribute]++;
-      if (target.value !== undefined) resetCommandCount++;
+      const nodeIdentity = target.node.handle === undefined
+        ? target.node
+        : target.node.handle;
+      let group = nodeGroups.get(nodeIdentity);
+      if (!group) {
+        group = {
+          label: target.label || '文本对象',
+          builder: CompoundCommandBuilder.create(),
+          applied: {
+            [GlyphAttDoubleType.CharacterSpacing]: 0,
+            [GlyphAttDoubleType.ManualKerning]: 0,
+          },
+          commands: [],
+          resetCommandCount: 0,
+        };
+        nodeGroups.set(nodeIdentity, group);
+      }
+      builder.addCommand(createFormattingCommand(doc, target, value));
+      group.builder.addCommand(createFormattingCommand(doc, target, value));
+      group.applied[target.attribute]++;
+      group.commands.push({ target, value });
+      if (target.value !== undefined) group.resetCommandCount++;
     } catch (error) {
-      errors.push(`排版调整（索引 ${target.begin}）：${errorMessage(error)}`);
+      errors.push(
+        `排版调整（${target.label || '文本对象'}，索引 ${target.begin}）：${errorMessage(error)}`
+      );
     }
   }
 
-  const commandCount = applied[GlyphAttDoubleType.CharacterSpacing]
-    + applied[GlyphAttDoubleType.ManualKerning];
+  const commandCount = Array.from(nodeGroups.values()).reduce(
+    (count, group) =>
+      count + group.applied[GlyphAttDoubleType.CharacterSpacing] +
+      group.applied[GlyphAttDoubleType.ManualKerning],
+    0
+  );
+  queuedResetCommandCount = Array.from(nodeGroups.values())
+    .reduce((count, group) => count + group.resetCommandCount, 0);
   if (commandCount > 0) {
     try {
       doc.executeCommand(builder.createCommand());
       succeeded = true;
+      for (const group of nodeGroups.values()) {
+        applied[GlyphAttDoubleType.CharacterSpacing] +=
+          group.applied[GlyphAttDoubleType.CharacterSpacing];
+        applied[GlyphAttDoubleType.ManualKerning] +=
+          group.applied[GlyphAttDoubleType.ManualKerning];
+      }
+      resetCommandCount = queuedResetCommandCount;
     } catch (error) {
-      errors.push(`执行排版调整失败：${errorMessage(error)}`);
+      usedFallback = true;
+      errors.push(
+        `批量执行排版调整失败，正在逐文本对象重试：${errorMessage(error)}`
+      );
+      for (const group of nodeGroups.values()) {
+        try {
+          doc.executeCommand(group.builder.createCommand());
+          succeeded = true;
+          applied[GlyphAttDoubleType.CharacterSpacing] +=
+            group.applied[GlyphAttDoubleType.CharacterSpacing];
+          applied[GlyphAttDoubleType.ManualKerning] +=
+            group.applied[GlyphAttDoubleType.ManualKerning];
+          resetCommandCount += group.resetCommandCount;
+        } catch (groupError) {
+          errors.push(
+            `排版调整（${group.label}）批量失败，正在逐位置重试：${errorMessage(groupError)}`
+          );
+          for (const { target, value } of group.commands) {
+            try {
+              doc.executeCommand(createFormattingCommand(doc, target, value));
+              succeeded = true;
+              applied[target.attribute]++;
+              if (target.value !== undefined) resetCommandCount++;
+            } catch (targetError) {
+              errors.push(
+                `排版调整（${group.label}，索引 ${target.begin}）失败：${errorMessage(targetError)}`
+              );
+            }
+          }
+        }
+      }
     }
   }
-  return { ...applied, commandCount, resetCommandCount, succeeded };
+  return {
+    ...applied,
+    commandCount: applied[GlyphAttDoubleType.CharacterSpacing] +
+      applied[GlyphAttDoubleType.ManualKerning],
+    resetCommandCount,
+    succeeded,
+    usedFallback,
+  };
 }
 
 function scanParagraphBoundaries(text, label, findings) {
@@ -767,7 +892,7 @@ function formatReport(findings, scannedStories, scannedChars, errors, formatting
   let report = `Affinity CJK Typography Toolkit ${VERSION}\n`;
   report += `规则集：${profile.label}\n`;
   report += `扫描文本故事：${scannedStories} 个\n扫描字符：${scannedChars}\n发现项目：${total}\n`;
-  report += `\n说明：排版调整须在对话框中勾选；所有调整合并为一次可撤销操作。\n`;
+  report += `\n说明：排版调整须在对话框中勾选；通常合并为一次可撤销操作。批量命令失败时会按文本对象隔离重试。\n`;
   report += `位置采用文本字符串的 UTF-16 索引，并同时标注段落序号。\n`;
   report += `中西文空格与邻接提示受 CONFIG 中的策略设置影响。\n`;
   if (formattingSummary) report += `${formattingSummary}\n`;
@@ -840,37 +965,52 @@ function main() {
   }
 
   const selected = doc.selection.nodes.toArray().filter(n => n.isTextNode);
-  if (!selected.length) {
-    alert('请先选择一个或多个文本对象（文本框或艺术字）。');
+  let masterNodes = [];
+  let masterScanError = null;
+  try {
+    masterNodes = collectMasterTextNodes(doc);
+  } catch (error) {
+    masterScanError = errorMessage(error);
+  }
+  const textNodes = [
+    ...selected.map((node, index) => ({ node, label: `文本对象 ${index + 1}` })),
+    ...masterNodes.map((node, index) => ({ node, label: `母版页文本对象 ${index + 1}` })),
+  ];
+  if (!textNodes.length) {
+    alert(masterScanError
+      ? `读取母版页文本对象失败：${masterScanError}`
+      : '请先选择一个或多个文本对象（文本框或艺术字），或在文档中添加母版页文本框。');
     return;
   }
 
   const seenStories = new Set();
   const findings = {};
   const errors = [];
+  if (masterScanError) errors.push(`读取母版页文本对象失败：${masterScanError}`);
   const selectedStories = [];
   let scannedStories = 0;
   let scannedChars = 0;
 
-  for (let i = 0; i < selected.length; i++) {
+  for (let i = 0; i < textNodes.length; i++) {
     try {
-      const node = selected[i];
+      const { node, label } = textNodes[i];
       const story = node.story;
       if (!story) {
-        errors.push(`文本对象 ${i + 1} 没有可读取的 Story。`);
+        errors.push(`${label} 没有可读取的 Story。`);
         continue;
       }
-      if (CONFIG.scanLinkedStoryOnce && seenStories.has(story)) continue;
-      seenStories.add(story);
+      const identity = storyIdentity(story);
+      if (CONFIG.scanLinkedStoryOnce && seenStories.has(identity)) continue;
+      seenStories.add(identity);
 
       const text = getStoryText(story);
 
       scannedStories++;
       scannedChars += Array.from(text).length;
-      scanStory(text, `文本对象 ${i + 1}`, findings);
-      selectedStories.push({ node, text, label: `文本对象 ${i + 1}` });
+      scanStory(text, label, findings);
+      selectedStories.push({ node, text, label });
     } catch (error) {
-      errors.push(`文本对象 ${i + 1}：${errorMessage(error)}`);
+      errors.push(`${textNodes[i].label}：${errorMessage(error)}`);
     }
   }
 
@@ -878,26 +1018,35 @@ function main() {
   const resetRanges = [];
   for (const item of selectedStories) {
     let nodeRange;
+    let selectionNode;
     try {
       nodeRange = getNodeStoryText(item.node);
+      selectionNode = item.node.storyInterface?.node || item.node;
     } catch (error) {
       errors.push(`${item.label}（文本范围）：${errorMessage(error)}`);
       continue;
     }
     resetRanges.push({
-      node: item.node,
+      node: selectionNode,
       story: nodeRange.story,
       begin: nodeRange.begin,
       end: nodeRange.end,
+      label: item.label,
     });
 
     try {
-      candidates.cjkLatin.push(...findCjkLatinBoundaries(item.node, nodeRange.text, nodeRange));
+      candidates.cjkLatin.push(
+        ...findCjkLatinBoundaries(selectionNode, nodeRange.text, nodeRange)
+          .map(target => ({ ...target, label: item.label }))
+      );
     } catch (error) {
       errors.push(`${item.label}（中西文字距）：${errorMessage(error)}`);
     }
     try {
-      candidates.punctuationRuns.push(...findConsecutivePunctuationTargets(item.node, nodeRange.text, nodeRange));
+      candidates.punctuationRuns.push(
+        ...findConsecutivePunctuationTargets(selectionNode, nodeRange.text, nodeRange)
+          .map(target => ({ ...target, label: item.label }))
+      );
     } catch (error) {
       errors.push(`${item.label}（连续标点）：${errorMessage(error)}`);
     }
@@ -946,17 +1095,20 @@ function main() {
 
     if (targets.length) {
       const applied = applyTypographyAdjustments(doc, targets, errors);
+      const applicationMode = applied.usedFallback
+        ? '已隔离重试（各成功对象/位置分别撤销）'
+        : '已应用（单次撤销）';
       formattingSummary = applied.succeeded
         ? options.resetSpacing
-          ? `已应用（单次撤销）：已执行字符间距/字偶距归零命令 ${applied.resetCommandCount} 项；另执行字距调整 ${Math.max(0, applied.commandCount - applied.resetCommandCount)} 项。`
-          : `已应用（单次撤销）：中西文字符间距 ${applied[GlyphAttDoubleType.CharacterSpacing]} 处，连续标点字偶距 ${applied[GlyphAttDoubleType.ManualKerning]} 处。`
+          ? `${applicationMode}：已执行字符间距/字偶距归零命令 ${applied.resetCommandCount} 项；另执行字距调整 ${Math.max(0, applied.commandCount - applied.resetCommandCount)} 项。`
+          : `${applicationMode}：中西文字符间距 ${applied[GlyphAttDoubleType.CharacterSpacing]} 处，连续标点字偶距 ${applied[GlyphAttDoubleType.ManualKerning]} 处。`
         : '排版调整未应用；请查看处理异常。';
     } else {
       formattingSummary = `未应用排版调整。${candidateSummary}`;
     }
   }
 
-  alert(formatReport(findings, scannedStories, scannedChars, errors, formattingSummary));
+  console.log(formatReport(findings, scannedStories, scannedChars, errors, formattingSummary));
 }
 
 main();
