@@ -1,5 +1,5 @@
 // Affinity CJK Typography Toolkit
-// Version: 0.5.11
+// Version: 0.5.12
 // Purpose: configurable CJK typography audit and optional Yakumono compression.
 // Target: Affinity by Canva desktop scripting API (SDK 3.3.x)
 // License: MIT
@@ -48,6 +48,11 @@
 // 0.5.11 fixes:
 // - exclude wave dash and fullwidth tilde from punctuation compression
 // - write the completion report without opening a modal alert
+//
+// 0.5.12 fixes:
+// - add a selectable scan scope from selected text objects to the whole document
+// - continue scanning accessible spreads and nodes when another tree branch fails
+// - support SDKs with and without the dedicated master-spread collection
 
 // 0.4.7 fixes:
 // - build formatting candidates from Story.text and the node's StoryRange
@@ -99,7 +104,7 @@ const { StoryDelta } = require('/storydelta.js');
 const { DocumentCommand, CompoundCommandBuilder } = require('/commands.js');
 const { StoryRange } = require('affinity:story');
 
-const VERSION = '0.5.11';
+const VERSION = '0.5.12';
 
 // Edit these settings before running, or use one of the presets below.
 const CONFIG = {
@@ -360,27 +365,76 @@ function getNodeStoryText(node) {
   );
 }
 
-function collectMasterTextNodes(doc) {
-  const spreads = doc.spreads;
+function collectDocumentTextNodes(doc) {
   const roots = [];
-  for (const spread of spreads.toArray()) {
-    const layers = spread.layers;
-    roots.push(...layers.toArray());
+  const errors = [];
+  for (const [label, getCollection, optional] of [
+    ['文档页面', () => doc.spreads, false],
+    ['母版页', () => doc.masterSpreads, true],
+  ]) {
+    try {
+      const collection = getCollection();
+      if (optional && (collection === undefined || collection === null)) continue;
+      if (!collection || typeof collection.toArray !== 'function') {
+        throw new Error('SDK 未返回有效的节点集合。');
+      }
+      for (const node of collection.toArray()) roots.push(node);
+    } catch (error) {
+      errors.push(`读取${label}列表失败：${errorMessage(error)}`);
+    }
   }
 
-  const masterNodes = [];
+  const textNodes = [];
   const visited = new Set();
   while (roots.length) {
     const node = roots.pop();
     if (!node) continue;
-    const nodeIdentity = node.handle === undefined ? node : node.handle;
+    let nodeIdentity = node;
+    try {
+      nodeIdentity = node.handle === undefined ? node : node.handle;
+    } catch (error) {
+      errors.push(`读取节点标识失败：${errorMessage(error)}`);
+    }
     if (visited.has(nodeIdentity)) continue;
     visited.add(nodeIdentity);
 
-    if (node.isTextNode && node.isMasterEditable) masterNodes.push(node);
-    roots.push(...node.children.toArray());
+    try {
+      if (node.isTextNode) textNodes.push(node);
+    } catch (error) {
+      errors.push(`读取文本节点属性失败：${errorMessage(error)}`);
+    }
+    try {
+      const children = node.children;
+      if (!children || typeof children.toArray !== 'function') {
+        throw new Error('SDK 未返回有效的子节点集合。');
+      }
+      for (const child of children.toArray()) roots.push(child);
+    } catch (error) {
+      errors.push(`读取节点子项失败：${errorMessage(error)}`);
+    }
   }
-  return masterNodes;
+  return { textNodes, errors };
+}
+
+function requestScanScope() {
+  const dialog = Dialog.create(`Affinity CJK Typography Toolkit ${VERSION}`);
+  dialog.initialWidth = 420;
+  const column = dialog.addColumn();
+  const scopeGroup = column.addGroup('文本查询范围');
+  const scope = scopeGroup.addRadioGroup(
+    '扫描范围',
+    ['选取项', '文档'],
+    0
+  );
+  scopeGroup.addStaticText(
+    '“选取项”仅扫描当前选中的文本对象；“文档”扫描页面与母版页中的文本对象。'
+  );
+
+  const result = dialog.runModal();
+  if (result.value !== DialogResult.Ok.value) return null;
+  if (scope.selectedIndex === 0) return 'selection';
+  if (scope.selectedIndex === 1) return 'document';
+  throw new Error(`无效的文本查询范围索引：${scope.selectedIndex}`);
 }
 
 function findCjkLatinBoundaries(node, text, nodeRange = getNodeStoryText(node)) {
@@ -419,7 +473,7 @@ function requestTypographyOptions(counts) {
     '字距增量（em）',
     UnitType.Number,
     UnitType.Number,
-    0.03,
+    0.25,
     -0.5,
     0.5
   );
@@ -477,6 +531,19 @@ function findConsecutivePunctuationTargets(node, text, nodeRange = getNodeStoryT
   const points = codePoints(text)
     .map(point => ({ ...point, offset: point.offset + begin }));
   const targets = [];
+  const dotPunctuation = new Set(Array.from('，、。？！；：'));
+  for (let i = 0; i < points.length; i++) {
+    if ((points[i].ch === '”' || points[i].ch === '’') &&
+        dotPunctuation.has(points[i + 1]?.ch)) {
+      targets.push({
+        node,
+        story,
+        begin: points[i].offset,
+        end: points[i].offset + points[i].length,
+        sample: `${points[i].ch}${points[i + 1].ch}`,
+      });
+    }
+  }
   for (let i = 0; i + 1 < points.length;) {
     if (!isCompressiblePunctuation(points[i].ch)) {
       i++;
@@ -884,13 +951,14 @@ function scanStory(text, label, findings) {
   }
 }
 
-function formatReport(findings, scannedStories, scannedChars, errors, formattingSummary) {
+function formatReport(findings, scannedStories, scannedChars, errors, formattingSummary, scanScope) {
   let total = 0;
   for (const key of Object.keys(findings)) total += findings[key].length;
 
   const profile = PROFILES[CONFIG.profile] || PROFILES.custom;
   let report = `Affinity CJK Typography Toolkit ${VERSION}\n`;
   report += `规则集：${profile.label}\n`;
+  report += `扫描范围：${scanScope === 'document' ? '文档' : '选取项'}\n`;
   report += `扫描文本故事：${scannedStories} 个\n扫描字符：${scannedChars}\n发现项目：${total}\n`;
   report += `\n说明：排版调整须在对话框中勾选；通常合并为一次可撤销操作。批量命令失败时会按文本对象隔离重试。\n`;
   report += `位置采用文本字符串的 UTF-16 索引，并同时标注段落序号。\n`;
@@ -958,57 +1026,89 @@ function main() {
     return;
   }
 
-  const doc = Document.current;
+  let doc;
+  try {
+    doc = Document.current;
+  } catch (error) {
+    alert(`读取当前文档失败：${errorMessage(error)}`);
+    return;
+  }
   if (!doc) {
     alert('请先打开一个 Affinity 文档。');
     return;
   }
 
-  const selected = doc.selection.nodes.toArray().filter(n => n.isTextNode);
-  let masterNodes = [];
-  let masterScanError = null;
+  let scanScope;
   try {
-    masterNodes = collectMasterTextNodes(doc);
+    scanScope = requestScanScope();
   } catch (error) {
-    masterScanError = errorMessage(error);
+    alert(`无法选择文本查询范围：${errorMessage(error)}`);
+    return;
   }
-  const textNodes = [
-    ...selected.map((node, index) => ({ node, label: `文本对象 ${index + 1}` })),
-    ...masterNodes.map((node, index) => ({ node, label: `母版页文本对象 ${index + 1}` })),
-  ];
+  if (!scanScope) return;
+
+  let textNodes = [];
+  const collectionErrors = [];
+  if (scanScope === 'selection') {
+    try {
+      const selectedNodes = doc.selection.nodes.toArray();
+      for (let index = 0; index < selectedNodes.length; index++) {
+        const node = selectedNodes[index];
+        try {
+          if (node.isTextNode) {
+            textNodes.push({ node, label: `文本对象 ${textNodes.length + 1}` });
+          }
+        } catch (error) {
+          collectionErrors.push(
+            `读取选取项 ${index + 1} 的文本节点属性失败：${errorMessage(error)}`
+          );
+        }
+      }
+    } catch (error) {
+      collectionErrors.push(`读取当前选取项失败：${errorMessage(error)}`);
+    }
+  } else {
+    const collection = collectDocumentTextNodes(doc);
+    for (const error of collection.errors) collectionErrors.push(error);
+    textNodes = collection.textNodes.map((node, index) => ({
+      node,
+      label: `文档文本对象 ${index + 1}`,
+    }));
+  }
   if (!textNodes.length) {
-    alert(masterScanError
-      ? `读取母版页文本对象失败：${masterScanError}`
-      : '请先选择一个或多个文本对象（文本框或艺术字），或在文档中添加母版页文本框。');
+    const message = scanScope === 'document'
+      ? '文档中没有可扫描的文本对象。'
+      : '请先选择一个或多个文本对象（文本框或艺术字）。';
+    alert(collectionErrors.length
+      ? `${message}\n${collectionErrors.join('\n')}`
+      : message);
     return;
   }
 
   const seenStories = new Set();
   const findings = {};
-  const errors = [];
-  if (masterScanError) errors.push(`读取母版页文本对象失败：${masterScanError}`);
-  const selectedStories = [];
+  const errors = [...collectionErrors];
+  const formattingNodes = [];
   let scannedStories = 0;
   let scannedChars = 0;
 
   for (let i = 0; i < textNodes.length; i++) {
     try {
       const { node, label } = textNodes[i];
-      const story = node.story;
+      const story = node.storyInterface?.story || node.story;
       if (!story) {
         errors.push(`${label} 没有可读取的 Story。`);
         continue;
       }
       const identity = storyIdentity(story);
-      if (CONFIG.scanLinkedStoryOnce && seenStories.has(identity)) continue;
-      seenStories.add(identity);
-
-      const text = getStoryText(story);
-
-      scannedStories++;
-      scannedChars += Array.from(text).length;
-      scanStory(text, label, findings);
-      selectedStories.push({ node, text, label });
+      if (!CONFIG.scanLinkedStoryOnce || !seenStories.has(identity)) {
+        const text = getStoryText(story);
+        scanStory(text, label, findings);
+        seenStories.add(identity);
+        scannedStories++;
+        scannedChars += Array.from(text).length;
+      }
+      formattingNodes.push({ node, label });
     } catch (error) {
       errors.push(`${textNodes[i].label}：${errorMessage(error)}`);
     }
@@ -1016,7 +1116,8 @@ function main() {
 
   const candidates = { cjkLatin: [], punctuationRuns: [] };
   const resetRanges = [];
-  for (const item of selectedStories) {
+  const seenFormattingRanges = new Map();
+  for (const item of formattingNodes) {
     let nodeRange;
     let selectionNode;
     try {
@@ -1026,6 +1127,16 @@ function main() {
       errors.push(`${item.label}（文本范围）：${errorMessage(error)}`);
       continue;
     }
+    const identity = storyIdentity(nodeRange.story);
+    let seenRanges = seenFormattingRanges.get(identity);
+    if (!seenRanges) {
+      seenRanges = new Set();
+      seenFormattingRanges.set(identity, seenRanges);
+    }
+    const rangeKey = `${nodeRange.begin}:${nodeRange.end}`;
+    if (seenRanges.has(rangeKey)) continue;
+    seenRanges.add(rangeKey);
+
     resetRanges.push({
       node: selectionNode,
       story: nodeRange.story,
@@ -1108,7 +1219,9 @@ function main() {
     }
   }
 
-  console.log(formatReport(findings, scannedStories, scannedChars, errors, formattingSummary));
+  console.log(formatReport(
+    findings, scannedStories, scannedChars, errors, formattingSummary, scanScope
+  ));
 }
 
 main();
