@@ -1,13 +1,13 @@
 # Affinity CJK Typography Toolkit
 
-**Version:** 0.5.12  
-**Target:** Affinity by Canva desktop scripting API (SDK 3.3.x)  
-**Platform:** macOS / Windows desktop  
+**Version:** 0.5.12
+**Target:** Affinity by Canva desktop scripting API (SDK 3.3.x)
+**Platform:** macOS / Windows desktop
 **License:** MIT
 
 ## 简介
 
-这是一个供 Affinity 桌面版使用的 CJK 文本审校脚本。它检查常见标点、括号、空格和中西文邻接问题，并提供可选的字距微调与连续标点挤压。审校只生成报告，不会自动改写文本；只有在调整对话框中勾选对应选项后，脚本才会修改字符间距或字偶距。
+这是一个供 Affinity 桌面版使用的 CJK 文本排版脚本。它检查常见标点、括号、空格和中西文邻接问题，并提供可选的字距微调与连续标点挤压。审校只生成报告，不会自动改写文本；只有在调整对话框中勾选对应选项后，脚本才会修改字符间距或字偶距。
 
 脚本按 Affinity SDK 3.3.x 编写。使用前请确认当前 Affinity 版本已启用 Scripting，并且已打开要检查的文档。
 
