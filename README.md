@@ -7,7 +7,7 @@
 
 ## 简介
 
-这是一个供 Affinity 桌面版使用的 CJK 文本排版脚本。它检查常见标点、括号、空格和中西文邻接问题，并提供可选的字距微调与连续标点挤压。审校只生成报告，不会自动改写文本；只有在调整对话框中勾选对应选项后，脚本才会修改字符间距或字偶距。
+这是一个供 Affinity 桌面版使用的 CJK 文本排版脚本。它检查常见标点、括号、空格和中西文邻接问题，并提供可选的字距微调与连续标点挤压。审校只生成报告，不会自动改写文本；只有在调整对话框中勾选对应选项后，脚本才会修改 Tracking（字符间距）。
 
 脚本按 Affinity SDK 3.3.x 编写。使用前请确认当前 Affinity 版本已启用 Scripting，并且已打开要检查的文档。
 
@@ -208,17 +208,17 @@ const CONFIG = {
 
 ## 可选字距微调
 
-扫描到中西文/数字直接相邻时，会显示可调整位置数量。勾选后可设置字距增量，单位为 em，默认 `0.25`，允许范围为 `-0.5` 至 `0.5`；正值增加间距，负值收紧间距。增量应用于每处边界左侧字符的 `CharacterSpacing` 属性，不会插入空格或更改文本内容。没有候选位置时，该选项会禁用。
+扫描到中西文/数字直接相邻时，会显示可调整位置数量。勾选后可设置字距增量，单位为 em，默认 `0.25`，允许范围为 `-0.5` 至 `0.5`；正值增加间距，负值收紧间距。增量应用于每处边界左侧字符的 `CharacterSpacing`（Tracking）属性，不会插入空格或更改文本内容。没有候选位置时，该选项会禁用。
 
 ## 连续标点挤压
 
-- 在每对相邻且可压缩的标点之间应用 `ManualKerning`（字偶距）增量。只处理紧邻且没有空格或换行的标点对，例如 `！！`、`？！`；`！ ！` 不会作为一对处理。
+- 在每对相邻且可压缩的标点之间应用 `CharacterSpacing`（Tracking/字符间距）增量。只处理紧邻且没有空格或换行的标点对，例如 `！！`、`？！`；`！ ！` 不会作为一对处理。
 - 省略号（例如 `……`、`‥`、`...` 和 `．．．`）、破折号（例如 `——`）以及波浪号（例如 `〜`、`～`）不会被挤压；汉字及汉字重复符号也不会作为挤压目标。
 - 需手动勾选，增量允许在 `-1` 到 `0 em` 之间调整，默认值为 `-0.5 em`。文本内容保持不变；没有匹配项时该选项会禁用。
 
 ## 修复已有字距
 
-在排版对话框中勾选“修复已有字距”，可将当前查询范围内文本范围的 `CharacterSpacing` 和 `ManualKerning` 设为 `0`。默认关闭。此操作会一并清除范围内原本有意设置的手工字距，不只清除本脚本写入的值；建议先复制文档并确认结果。
+在排版对话框中勾选“修复已有字距”，可将当前查询范围内文本范围的 `CharacterSpacing` 和 `ManualKerning` 设为 `0`。默认关闭。除清除当前使用的 Tracking 外，也会清除旧版本脚本可能写入的 `ManualKerning`；此操作会一并清除范围内原本有意设置的手工字距，不只清除本脚本写入的值，建议先复制文档并确认结果。
 
 所有排版调整默认不勾选，因此只运行审校时不会修改文档。批量调整成功时通常合并为一个 Affinity 撤销命令；若批量命令失败，脚本会隔离到文本对象或位置逐项重试，成功项可能需要分别撤销。结果报告会列出扫描范围、候选数量及处理异常；部分节点失败不会被当作整体成功隐藏。
 
@@ -233,9 +233,9 @@ const CONFIG = {
 
 ## 安全边界
 
-本工具不自动替换标点、不删除空格、不插入空格，也不修改字体或段落格式。只有用户明确勾选后才写入字符间距或字偶距调整。
+本工具不自动替换标点、不删除空格、不插入空格，也不修改字体或段落格式。只有用户明确勾选后才写入 Tracking（字符间距）调整；重置功能会额外清理 `ManualKerning`，以兼容旧版本写入的字偶距。
 
-排版规则参考 [W3C 日本语组版要求](https://www.w3.org/TR/jlreq/) 的行首禁则约物说明；行轮廓定位和相邻字符 `ManualKerning` 用法参考 [Affinity 社区 `optical-kerning.js`](https://github.com/JiriKrblich/Affinity-Community-Scripts/blob/main/scripts/optical-kerning.js)。格式命令采用社区脚本中 `DocumentCommand`、`StoryDelta` 和 `TextSelection` 的模式。文档范围的 spread 遍历与文本 API 按 [Affinity SDK 官方文档](https://sdk.affinity.studio/latest/)（本次核对版本 3.3.3）及 SDK 内置 JSLib 用法实现，并针对本机 Affinity 3.3.1 的 JSLib 保留了 `masterSpreads` 不可用时的回退。`Story.getText` / `StoryRange` 接口另与[社区维护的 Affinity 脚本类型定义](https://github.com/christippett/affinity-script-types)交叉核对；混合格式、链接文本框及撤销行为仍建议在实际文档中先行验证。
+排版规则参考 [W3C 日本语组版要求](https://www.w3.org/TR/jlreq/) 的行首禁则约物说明。格式命令采用社区脚本中 `DocumentCommand`、`StoryDelta` 和 `TextSelection` 的模式。文档范围的 spread 遍历与文本 API 按 [Affinity SDK 官方文档](https://sdk.affinity.studio/latest/)（本次核对版本 3.3.3）及 SDK 内置 JSLib 用法实现，并针对本机 Affinity 3.3.1 的 JSLib 保留了 `masterSpreads` 不可用时的回退。`Story.getText` / `StoryRange` 接口另与[社区维护的 Affinity 脚本类型定义](https://github.com/christippett/affinity-script-types)交叉核对；混合格式、链接文本框及撤销行为仍建议在实际文档中先行验证。
 
 ## 测试文本
 

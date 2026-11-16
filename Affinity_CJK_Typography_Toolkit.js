@@ -53,6 +53,9 @@
 // - add a selectable scan scope from selected text objects to the whole document
 // - continue scanning accessible spreads and nodes when another tree branch fails
 // - support SDKs with and without the dedicated master-spread collection
+//
+// 0.5.13 fixes:
+// - use CharacterSpacing (tracking) for consecutive-punctuation compression
 
 // 0.4.7 fixes:
 // - build formatting candidates from Story.text and the node's StoryRange
@@ -104,7 +107,7 @@ const { StoryDelta } = require('/storydelta.js');
 const { DocumentCommand, CompoundCommandBuilder } = require('/commands.js');
 const { StoryRange } = require('affinity:story');
 
-const VERSION = '0.5.12';
+const VERSION = '0.5.13';
 
 // Edit these settings before running, or use one of the presets below.
 const CONFIG = {
@@ -464,13 +467,13 @@ function requestTypographyOptions(counts) {
   dialog.initialWidth = 520;
 
   const column = dialog.addColumn();
-  const spacingGroup = column.addGroup('中西文字距');
+  const spacingGroup = column.addGroup('中西文 Tracking 字距');
   const applySpacing = spacingGroup.addCheckBox(
-    `调整 ${counts.cjkLatin} 处中西文直接相邻字距`,
+    `调整 ${counts.cjkLatin} 处中西文直接相邻 Tracking 字距`,
     false
   );
   const spacingAmount = spacingGroup.addUnitValueEditor(
-    '字距增量（em）',
+    'Tracking 字距增量（em）',
     UnitType.Number,
     UnitType.Number,
     0.25,
@@ -481,13 +484,13 @@ function requestTypographyOptions(counts) {
   applySpacing.isEnabled = counts.cjkLatin > 0;
   spacingAmount.isEnabled = counts.cjkLatin > 0;
 
-  const runGroup = column.addGroup('连续标点挤压');
+  const runGroup = column.addGroup('连续标点 Tracking 挤压');
   const applyRuns = runGroup.addCheckBox(
     `压缩 ${counts.punctuationRuns} 处连续标点间距${counts.punctuationSample ? `（如“${counts.punctuationSample}”）` : ''}`,
     false
   );
   const runAmount = runGroup.addUnitValueEditor(
-    '每对标点字偶距增量（em）',
+    '每对标点 Tracking 增量（em）',
     UnitType.Number,
     UnitType.Number,
     -0.5,
@@ -1199,7 +1202,7 @@ function main() {
       } else if (options.runAmount !== 0) {
         collectFormattingTargets(
           targets, targetLookup, candidates.punctuationRuns,
-          GlyphAttDoubleType.ManualKerning, options.runAmount
+          GlyphAttDoubleType.CharacterSpacing, options.runAmount
         );
       }
     }
@@ -1212,7 +1215,7 @@ function main() {
       formattingSummary = applied.succeeded
         ? options.resetSpacing
           ? `${applicationMode}：已执行字符间距/字偶距归零命令 ${applied.resetCommandCount} 项；另执行字距调整 ${Math.max(0, applied.commandCount - applied.resetCommandCount)} 项。`
-          : `${applicationMode}：中西文字符间距 ${applied[GlyphAttDoubleType.CharacterSpacing]} 处，连续标点字偶距 ${applied[GlyphAttDoubleType.ManualKerning]} 处。`
+          : `${applicationMode}：中西文/标点 Tracking 字距调整 ${applied[GlyphAttDoubleType.CharacterSpacing]} 处。`
         : '排版调整未应用；请查看处理异常。';
     } else {
       formattingSummary = `未应用排版调整。${candidateSummary}`;
