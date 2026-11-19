@@ -1,5 +1,5 @@
 // Affinity CJK Typography Toolkit
-// Version: 0.5.12
+// Version: 0.5.14
 // Purpose: configurable CJK typography audit and optional Yakumono compression.
 // Target: Affinity by Canva desktop scripting API (SDK 3.3.x)
 // License: MIT
@@ -56,6 +56,11 @@
 //
 // 0.5.13 fixes:
 // - use CharacterSpacing (tracking) for consecutive-punctuation compression
+//
+// 0.5.14 fixes:
+// - exclude ASCII punctuation from consecutive-punctuation detection and compression
+// - apply CJK/Latin tracking to the character on the right side of the boundary
+// - keep formatting ranges distinct for separate page/master-page text nodes
 
 // 0.4.7 fixes:
 // - build formatting candidates from Story.text and the node's StoryRange
@@ -107,7 +112,7 @@ const { StoryDelta } = require('/storydelta.js');
 const { DocumentCommand, CompoundCommandBuilder } = require('/commands.js');
 const { StoryRange } = require('affinity:story');
 
-const VERSION = '0.5.13';
+const VERSION = '0.5.14';
 
 // Edit these settings before running, or use one of the presets below.
 const CONFIG = {
@@ -154,6 +159,7 @@ const CJK = /[\u2E80-\u2EFF\u2F00-\u2FDF\u3000-\u303F\u3040-\u30FF\u3100-\u312F\
 const HAN_IDEOGRAPH = /[\u3005-\u3007\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u{20000}-\u{2FA1F}\u{30000}-\u{323AF}]/u;
 const LATIN_OR_DIGIT = /[A-Za-z0-9]/;
 const ASCII_PUNCT = /[,.;:!?]/;
+const ASCII_PUNCTUATION = /[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]/;
 const PUNCTUATION = new Set(Array.from(
   '！？，。；：、…‥・．，｡､〝〞〟〃々〆〜～ー‐‑‒–—―：；？！·・･「」『』【】〔〕〈〉《》「」〘〙〚〛（）［］｛｝｢｣､｡﹐﹑﹒﹔﹕﹖﹗﹙﹚﹛﹜﹝﹞﹟﹠﹡﹣﹦﹨﹩﹪﹫ﹰﹱﹲﹳﹴ﹵ﹶﹷﹸﹹﹺﹻﹼﹽﹾﹿ,.!?;:()[]{}<>'
 ));
@@ -221,6 +227,10 @@ function storyIdentity(story) {
   return story && story.handle !== undefined ? story.handle : story;
 }
 
+function nodeIdentity(node) {
+  return node && node.handle !== undefined ? node.handle : node;
+}
+
 function getStoryText(story) {
   if (typeof story.text === 'string') return story.text;
   if (typeof story.getLength !== 'function' || typeof story.getText !== 'function') {
@@ -248,6 +258,7 @@ function isLatinOrDigit(ch) {
 
 function isCompressiblePunctuation(ch) {
   return PUNCTUATION.has(ch) &&
+    !ASCII_PUNCTUATION.test(ch) &&
     !HAN_IDEOGRAPH.test(ch) &&
     !DASH_PUNCTUATION.has(ch) &&
     !NON_COMPRESSIBLE_PUNCTUATION.has(ch);
@@ -392,14 +403,14 @@ function collectDocumentTextNodes(doc) {
   while (roots.length) {
     const node = roots.pop();
     if (!node) continue;
-    let nodeIdentity = node;
+    let identity = node;
     try {
-      nodeIdentity = node.handle === undefined ? node : node.handle;
+      identity = nodeIdentity(node);
     } catch (error) {
       errors.push(`读取节点标识失败：${errorMessage(error)}`);
     }
-    if (visited.has(nodeIdentity)) continue;
-    visited.add(nodeIdentity);
+    if (visited.has(identity)) continue;
+    visited.add(identity);
 
     try {
       if (node.isTextNode) textNodes.push(node);
@@ -454,8 +465,8 @@ function findCjkLatinBoundaries(node, text, nodeRange = getNodeStoryText(node)) 
       targets.push({
         node,
         story,
-        begin: begin + left.offset,
-        end: begin + left.offset + left.length,
+        begin: begin + right.offset,
+        end: begin + right.offset + right.length,
       });
     }
   }
@@ -590,10 +601,16 @@ function findConsecutivePunctuationTargets(node, text, nodeRange = getNodeStoryT
 function collectFormattingTargets(targets, lookup, candidates, attribute, amount) {
   for (const candidate of candidates) {
     const identity = storyIdentity(candidate.story);
-    let storyTargets = lookup.get(identity);
+    let nodeTargets = lookup.get(identity);
+    if (!nodeTargets) {
+      nodeTargets = new Map();
+      lookup.set(identity, nodeTargets);
+    }
+    const ownerIdentity = nodeIdentity(candidate.node);
+    let storyTargets = nodeTargets.get(ownerIdentity);
     if (!storyTargets) {
       storyTargets = new Map();
-      lookup.set(identity, storyTargets);
+      nodeTargets.set(ownerIdentity, storyTargets);
     }
     const key = `${candidate.begin}:${candidate.end}:${attribute}`;
     const existing = storyTargets.get(key);
@@ -676,10 +693,8 @@ function applyTypographyAdjustments(doc, targets, errors) {
         throw new Error('目标字距属性不是有效数值。');
       }
 
-      const nodeIdentity = target.node.handle === undefined
-        ? target.node
-        : target.node.handle;
-      let group = nodeGroups.get(nodeIdentity);
+      const ownerIdentity = nodeIdentity(target.node);
+      let group = nodeGroups.get(ownerIdentity);
       if (!group) {
         group = {
           label: target.label || '文本对象',
@@ -691,7 +706,7 @@ function applyTypographyAdjustments(doc, targets, errors) {
           commands: [],
           resetCommandCount: 0,
         };
-        nodeGroups.set(nodeIdentity, group);
+        nodeGroups.set(ownerIdentity, group);
       }
       builder.addCommand(createFormattingCommand(doc, target, value));
       group.builder.addCommand(createFormattingCommand(doc, target, value));
@@ -937,7 +952,7 @@ function scanStory(text, label, findings) {
   }
 
   if (CONFIG.checkRepeatedPunctuation) {
-    const repeated = /([，。！？；：、,.!?;:])\1+/gu;
+    const repeated = /([，。！？；：、])\1+/gu;
     let match;
     while ((match = repeated.exec(text)) !== null) {
       addFinding(
@@ -1131,10 +1146,15 @@ function main() {
       continue;
     }
     const identity = storyIdentity(nodeRange.story);
-    let seenRanges = seenFormattingRanges.get(identity);
+    let nodeRanges = seenFormattingRanges.get(identity);
+    if (!nodeRanges) {
+      nodeRanges = new Map();
+      seenFormattingRanges.set(identity, nodeRanges);
+    }
+    let seenRanges = nodeRanges.get(nodeIdentity(selectionNode));
     if (!seenRanges) {
       seenRanges = new Set();
-      seenFormattingRanges.set(identity, seenRanges);
+      nodeRanges.set(nodeIdentity(selectionNode), seenRanges);
     }
     const rangeKey = `${nodeRange.begin}:${nodeRange.end}`;
     if (seenRanges.has(rangeKey)) continue;
