@@ -1,5 +1,5 @@
 // Affinity CJK Regex Tracking
-// Version: 0.8.2
+// Version: 0.8.4
 // Apply 250‰ Tracking to CJK/Latin boundaries and -500‰ to punctuation that
 // trails blank space (dot punctuation, closing quotes and brackets) when it is
 // followed by punctuation.
@@ -14,11 +14,11 @@ const { Document } = require('/document.js');
 const { GlyphAttDoubleType } = require('/glyphatts.js');
 const { Selection, TextSelection, SubSelectionType } = require('/selections.js');
 const { StoryDelta } = require('/storydelta.js');
-const { DocumentCommand, CompoundCommandBuilder } = require('/commands.js');
+const { DocumentCommand } = require('/commands.js');
 const { StoryRange } = require('affinity:story');
 const { NodeChildType, NodeChildrenOnly } = require('/nodes.js');
 
-const VERSION = '0.8.2';
+const VERSION = '0.8.4';
 
 // 点号：字形在左侧、右侧留有空白，后接标点时压缩这格空白。
 const DOT_PUNCTUATION = '、。，．；：？！';
@@ -29,10 +29,16 @@ const CLOSING_PUNCTUATION = '”’〞〟）］｝〉》」』】〕〗〙〛';
 const CJK_PUNCTUATION =
   `${OPENING_PUNCTUATION}${CLOSING_PUNCTUATION}${DOT_PUNCTUATION}`;
 
+// 可调参数：直接改这里的数值即可。
+const TRACKING = {
+  cjkLatin: 0.250,
+  punctuation: -0.5,
+};
+
 const RULES = [
   {
     name: '中西文字符间距',
-    tracking: 0.250,
+    tracking: TRACKING.cjkLatin,
     regexes: [
       /[ぁ-ゖァ-ー\u32FF㍻-㍾\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF](?=[0-9A-Za-z])/gu,
       /[0-9A-Za-z](?=[ぁ-ゖァ-ー\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF])/gu,
@@ -40,11 +46,11 @@ const RULES = [
   },
   {
     name: '标点挤压',
-    tracking: -0.5,
+    tracking: TRACKING.punctuation,
     regexes: [
-      // 点号后接任意中日韩标点：压缩点号右侧空白。
+      // 点号后接任意中日韩标点：压缩点号右侧空白（如 ”，。 中的 ，）。
       new RegExp(`[${DOT_PUNCTUATION}](?=[${CJK_PUNCTUATION}])`, 'gu'),
-      // 后引号、后括号紧邻点号：压缩其右侧空白。
+      // 后引号、后括号紧邻点号：压缩其右侧空白（如 ”，“ 中的 ”）。
       new RegExp(`[${CLOSING_PUNCTUATION}](?=[${DOT_PUNCTUATION}])`, 'gu'),
     ],
   },
@@ -658,18 +664,19 @@ function collectRegexTargets(scopes, errors) {
   return { targets, stats, routed, unmatched };
 }
 
-function createFormattingCommand(doc, target, node) {
+// 同一节点上的多个目标放进同一个 TextSelection（多范围），一次命令写入，
+// 避免拆成多条命令时只有其中一条生效。
+function createFormattingCommand(doc, node, targets, tracking) {
   const selection = Selection.create(doc, node);
   selection.addSubSelectionForNode(
     node,
-    TextSelection.create([new StoryRange(target.begin, target.end)])
+    TextSelection.create(
+      targets.map(target => new StoryRange(target.begin, target.end))
+    )
   );
   return DocumentCommand.createFormatText(
     selection,
-    StoryDelta.createGlyphDouble(
-      GlyphAttDoubleType.CharacterSpacing,
-      target.tracking
-    )
+    StoryDelta.createGlyphDouble(GlyphAttDoubleType.CharacterSpacing, tracking)
   );
 }
 
@@ -693,6 +700,55 @@ function nodeFlags(node) {
   return flags.length ? `（${flags.join('，')}）` : '';
 }
 
+function findSpreadNode(node) {
+  let current = node;
+  for (let depth = 0; current && depth < 64; depth++) {
+    try {
+      if (current.isSpreadNode) return current;
+      current = current.parent;
+    } catch (error) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function spreadLabel(spread) {
+  try {
+    if (spread && spread.description) return spread.description;
+  } catch (error) {
+    // 忽略
+  }
+  try {
+    const firstPage = spread.firstPageIndex;
+    const lastPage = spread.lastPageIndex;
+    if (Number.isInteger(firstPage) && Number.isInteger(lastPage)) {
+      return firstPage === lastPage ? `第 ${firstPage + 1} 页` : `第 ${firstPage + 1}-${lastPage + 1} 页`;
+    }
+  } catch (error) {
+    // 忽略
+  }
+  return `spread ${nodeIdentity(spread)}`;
+}
+
+// 非当前 spread 上的文本格式命令会静默失效，执行前要把目标节点所在 spread 设为当前。
+function ensureCurrentSpread(doc, spread, errors) {
+  if (!spread) return;
+  try {
+    const current = doc.currentSpread;
+    if (current && nodeIdentity(current) === nodeIdentity(spread)) return;
+  } catch (error) {
+    // 读不到当前 spread 时继续尝试切换
+  }
+  try {
+    doc.executeCommand(DocumentCommand.createSetCurrentSpread(spread));
+  } catch (error) {
+    if (errors) {
+      errors.push(`切换到 ${spreadLabel(spread)} 失败：${errorMessage(error)}`);
+    }
+  }
+}
+
 function isTrackingApplied(target) {
   try {
     const atts = target.story.getGlyphAtts(target.begin);
@@ -704,7 +760,7 @@ function isTrackingApplied(target) {
   }
 }
 
-function executeTarget(doc, target) {
+function executeTarget(doc, target, errors) {
   const candidates = [];
   const addCandidate = node => {
     if (!node) return;
@@ -721,8 +777,11 @@ function executeTarget(doc, target) {
 
   const failures = [];
   for (const node of candidates) {
+    ensureCurrentSpread(doc, findSpreadNode(node), errors);
     try {
-      doc.executeCommand(createFormattingCommand(doc, target, node));
+      doc.executeCommand(
+        createFormattingCommand(doc, node, [target], target.tracking)
+      );
     } catch (error) {
       failures.push(`节点 ${nodeIdentity(node)}${nodeFlags(node)}：${errorMessage(error)}`);
       continue;
@@ -736,18 +795,7 @@ function executeTarget(doc, target) {
   throw new Error(failures.join('；') || '没有可用的格式目标节点。');
 }
 
-function applyRegexTargets(doc, targets, errors, stats) {
-  const groups = new Map();
-  for (const target of targets) {
-    const key = `${nodeIdentity(target.node)}:${target.ruleName}`;
-    let group = groups.get(key);
-    if (!group) {
-      group = { label: target.label, targets: [] };
-      groups.set(key, group);
-    }
-    group.targets.push(target);
-  }
-
+function applyNodeGroup(doc, group, errors, stats) {
   const recordFailure = (target, error) => {
     stats.get(target.ruleName).failed++;
     errors.push(
@@ -757,56 +805,80 @@ function applyRegexTargets(doc, targets, errors, stats) {
     );
   };
 
-  for (const group of groups.values()) {
-    const builder = CompoundCommandBuilder.create();
-    const validTargets = [];
-    for (const target of group.targets) {
+  const node = group.targets[0].node;
+  const tracking = group.targets[0].tracking;
+  const validTargets = group.targets;
+  if (!validTargets.length) return;
+
+  try {
+    doc.executeCommand(
+      createFormattingCommand(doc, node, validTargets, tracking)
+    );
+    const pending = [];
+    for (const target of validTargets) {
+      if (isTrackingApplied(target)) stats.get(target.ruleName).applied++;
+      else pending.push(target);
+    }
+    // 批量命令对母版实例等节点可能静默无效，逐个换节点重试
+    for (const target of pending) {
       try {
-        builder.addCommand(
-          createFormattingCommand(doc, target, target.node)
-        );
-        validTargets.push(target);
+        executeTarget(doc, target, errors);
+        stats.get(target.ruleName).applied++;
       } catch (error) {
         recordFailure(target, error);
       }
     }
-    if (!validTargets.length) continue;
-
-    try {
-      doc.executeCommand(builder.createCommand());
-      const pending = [];
-      for (const target of validTargets) {
-        if (isTrackingApplied(target)) stats.get(target.ruleName).applied++;
-        else pending.push(target);
-      }
-      // 批量命令对母版实例等节点可能静默无效，逐个换节点重试
-      for (const target of pending) {
-        try {
-          executeTarget(doc, target);
-          stats.get(target.ruleName).applied++;
-        } catch (error) {
-          recordFailure(target, error);
-        }
-      }
-    } catch (batchError) {
-      let allRecovered = true;
-      for (const target of validTargets) {
-        try {
-          executeTarget(doc, target);
-          stats.get(target.ruleName).applied++;
-        } catch (error) {
-          allRecovered = false;
-          recordFailure(target, error);
-        }
-      }
-      if (!allRecovered) {
-        errors.push(
-          `${group.label}批量调整失败，已逐个重试：` +
-          `${errorMessage(batchError)}`
-        );
+  } catch (batchError) {
+    for (const target of validTargets) {
+      try {
+        executeTarget(doc, target, errors);
+        stats.get(target.ruleName).applied++;
+      } catch (error) {
+        recordFailure(target, error);
       }
     }
+    errors.push(`${group.label}批量命令未通过，已逐个重试：${errorMessage(batchError)}`);
   }
+}
+
+function applyRegexTargets(doc, targets, errors, stats, restoreSpread) {
+  // 按节点分组，再按节点所在 spread 分桶：只有当前 spread 的格式命令才会生效。
+  const nodeGroups = new Map();
+  for (const target of targets) {
+    const key = `${nodeIdentity(target.node)}:${target.ruleName}`;
+    let group = nodeGroups.get(key);
+    if (!group) {
+      group = { label: target.label, targets: [], spread: null, spreadId: null };
+      nodeGroups.set(key, group);
+    }
+    group.targets.push(target);
+  }
+
+  const buckets = new Map();
+  for (const group of nodeGroups.values()) {
+    const spread = findSpreadNode(group.targets[0].node);
+    const identity = spread ? nodeIdentity(spread) : '__none__';
+    let bucket = buckets.get(identity);
+    if (!bucket) {
+      bucket = { spread, groups: [], spreadId: identity };
+      buckets.set(identity, bucket);
+    }
+    group.spread = spread;
+    group.spreadId = identity;
+    bucket.groups.push(group);
+  }
+
+  for (const bucket of buckets.values()) {
+    ensureCurrentSpread(doc, bucket.spread, errors);
+    for (const group of bucket.groups) {
+      applyNodeGroup(doc, group, errors, stats);
+    }
+  }
+
+  if (restoreSpread) {
+    ensureCurrentSpread(doc, restoreSpread, null);
+  }
+  return buckets.size;
 }
 
 function main() {
@@ -820,6 +892,13 @@ function main() {
   if (!doc) {
     alert('请先打开一个 Affinity 文档。');
     return;
+  }
+
+  let originalSpread = null;
+  try {
+    originalSpread = doc.currentSpread;
+  } catch (error) {
+    originalSpread = null;
   }
 
   const errors = [];
@@ -867,7 +946,7 @@ function main() {
   }
 
   const { targets, stats, routed, unmatched } = collectRegexTargets(scopes, errors);
-  applyRegexTargets(doc, targets, errors, stats);
+  const spreadCount = applyRegexTargets(doc, targets, errors, stats, originalSpread);
   const report = [
     `Affinity CJK Regex Tracking ${VERSION}`,
     `扫描范围：${scopeLabel}`,
@@ -880,6 +959,9 @@ function main() {
   }
   if (masterInstanceCount && !masterAccessible) {
     report.push('提示：当前 SDK 无法枚举母版页，母版实例只能直接改写自身节点。');
+  }
+  if (spreadCount) {
+    report.push(`涉及 spread：${spreadCount} 个（逐个切换为当前 spread 后写入）`);
   }
   if (trimmedRanges) {
     report.push(`Story 存在读取不到的字符，已按可读区间处理：${trimmedRanges} 个文本范围`);
