@@ -1,257 +1,25 @@
-// Affinity CJK Typography Toolkit
-// Version: 0.5.21
-// Purpose: configurable CJK typography audit and optional Yakumono compression.
+// Affinity CJK Regex Tracking
+// Version: 0.6.0
+// Apply 125‰ Tracking to regex-matched CJK/Latin boundary characters.
 // Target: Affinity by Canva desktop scripting API (SDK 3.3.x)
 // License: MIT
-//
-// 0.5.0 fixes:
-// - read StoryRange text through getText when available, with validated fallbacks
-// - keep UTF-16 offsets correct for supplementary characters in line-head checks
-// - support newer CJK ideograph extensions and avoid quadratic paragraph lookups
-// - prevent overlapping kerning options from exceeding the supported adjustment range
-//
-// 0.5.1 fixes:
-// - tolerate Affinity StoryRanges that include a trailing non-text boundary
-// - include actual range and text lengths in unrecoverable range errors
-//
-// 0.5.2 fixes:
-// - cap node formatting ranges at the readable Story text boundary
-// - recognize repeated paragraph-opening dialogue quotes as continuations
-// - reject out-of-bounds formatting targets before building the compound command
-//
-// 0.5.3 fixes:
-// - pass SDK StoryRange instances to TextSelection instead of plain objects
-// - report failed formatting commands as failures, not successful zero-count edits
-//
-// 0.5.4 fixes:
-// - remove line-head punctuation adjustments
-// - exempt ellipses and Han ideographs from consecutive-punctuation compression
-//
-// 0.5.5 fixes:
-// - add an opt-in reset for CharacterSpacing and ManualKerning in selected text ranges
-//
-// 0.5.6 fixes:
-// - exempt dash punctuation from consecutive-punctuation compression
-//
-// 0.5.7 fixes:
-// - scan text nodes on editable master-page spreads in addition to selected nodes
-//
-// 0.5.8 fixes:
-// - retry failed batch formatting commands per text node to isolate master-node failures
-//
-// 0.5.9 fixes:
-// - create text formatting selections with the node owned by the StoryInterface
-//
-// 0.5.10 fixes:
-// - build independent format commands for batch and per-node retry builders
-//
-// 0.5.11 fixes:
-// - exclude wave dash and fullwidth tilde from punctuation compression
-// - write the completion report without opening a modal alert
-//
-// 0.5.12 fixes:
-// - add a selectable scan scope from selected text objects to the whole document
-// - continue scanning accessible spreads and nodes when another tree branch fails
-// - support SDKs with and without the dedicated master-spread collection
-//
-// 0.5.13 fixes:
-// - use CharacterSpacing (tracking) for consecutive-punctuation compression
-//
-// 0.5.14 fixes:
-// - exclude ASCII punctuation from consecutive-punctuation detection and compression
-// - apply CJK/Latin tracking to the character on the right side of the boundary
-// - keep formatting ranges distinct for separate page/master-page text nodes
-//
-// 0.5.15 fixes:
-// - route inherited master-page text adjustments to matching master source frames
-//
-// 0.5.16 fixes:
-// - pass native node handles to the editability API
-// - ignore empty text ranges when building spacing reset targets
-//
-// 0.5.17 fixes:
-// - match inherited master instances against both frame-range and full-story text
-// - report master-source matching and routing counts
-//
-// 0.5.18 fixes:
-// - adjust CJK/Latin adjacency with pair kerning instead of character tracking
-//
-// 0.5.19 fixes:
-// - detect both CJK-to-Latin and Latin-to-CJK pairs with lookahead patterns
-// - apply ManualKerning to the right glyph to target the exact pair boundary
-//
-// 0.5.20 fixes:
-// - recognize master instances by master editability even when locally editable
-// - always report master-source and routing counts for document scans
-//
-// 0.5.21 fixes:
-// - apply pair kerning to the regex-matched left glyph, not the following glyph
-// - deduplicate repeated formatting targets instead of adding their amounts
-
-// 0.4.7 fixes:
-// - build formatting candidates from Story.text and the node's StoryRange
-// - exclude full-width punctuation from CJK/Latin adjacency checks
-
-// 0.4.6 fixed:
-// - preserve CJK/Latin spacing when node-local StoryRange reads are unavailable
-
-// 0.4.5 fixed:
-// - always show the typography options dialog, including when candidate detection fails
-// - isolate errors between candidate detectors
-
-// 0.4.4 fixed:
-// - read text using each node's absolute StoryRange before building formatting targets
-
-// 0.4.3 added:
-// - recognize full-width CJK punctuation without relying on Unicode property escapes
-// - show matched punctuation samples in the adjustment dialog
-
-// 0.4.2 added:
-// - clearer guidance when no adjacent punctuation pairs are found
-//
-// 0.4.1 fixed:
-// - compress consecutive punctuation with pair kerning instead of character tracking
-//
-// 0.4.0 added:
-// - actual line-head punctuation compression using rendered glyph outlines
-// - compression of consecutive punctuation runs
-//
-// 0.3.0 added:
-// - optional, undoable character-spacing adjustment at CJK/Latin boundaries
-// - supplementary-plane CJK recognition without losing UTF-16 offsets
-//
-// 0.2.0 added:
-// - rule profiles (Simplified Chinese, Traditional Chinese, Japanese)
-// - exact UTF-16 string offsets and paragraph numbers
-// - better bracket pairing (including nesting/order)
-// - clearer separation of policy-dependent spacing from likely errors
-// - safer per-story error handling
 
 'use strict';
 
 const { Document } = require('/document.js');
-const { Dialog, DialogResult } = require('/dialog.js');
-const { UnitType } = require('/units.js');
 const { GlyphAttDoubleType } = require('/glyphatts.js');
 const { Selection, TextSelection } = require('/selections.js');
 const { StoryDelta } = require('/storydelta.js');
 const { DocumentCommand, CompoundCommandBuilder } = require('/commands.js');
 const { StoryRange } = require('affinity:story');
-const { EditabilityInterfaceApi } = require('affinity:dom');
 
-const VERSION = '0.5.21';
+const VERSION = '0.6.0';
+const TRACKING = 0.125;
 
-// Edit these settings before running, or use one of the presets below.
-const CONFIG = {
-  profile: 'zh-CN',              // 'zh-CN' | 'zh-TW' | 'ja-JP' | 'custom'
-  maxExamplesPerCategory: 10,
-  scanLinkedStoryOnce: true,
-
-  // 'review': report CJK/Latin spaces as editorial choices
-  // 'ignore': do not report a single CJK/Latin space
-  // 'strict-no-space': report single spaces between CJK and Latin/digits
-  cjkLatinSpacePolicy: 'review',
-
-  // 'review': report CJK/Latin adjacency for optical inspection
-  // 'ignore': suppress these hints
-  cjkLatinAdjacency: 'review',
-
-  checkAsciiPunctuation: true,
-  checkRepeatedPunctuation: true,
-  checkBracketPairs: true,
-  checkParagraphBoundaries: true,
-  checkRepeatedSpaces: true,
-};
-
-const PROFILES = {
-  'zh-CN': {
-    label: '简体中文（大陆）',
-    punctuationHint: '中文语境通常优先使用全角中文标点；英文、代码和专名内部按原文处理',
-  },
-  'zh-TW': {
-    label: '繁体中文（台湾）',
-    punctuationHint: '中文语境通常优先使用全形中文標點；英文、程式碼和專名内部按原文处理',
-  },
-  'ja-JP': {
-    label: '日本語',
-    punctuationHint: '日文语境通常使用「、」「。」等日文标点；英文和代码内部按原文处理',
-  },
-  custom: {
-    label: '自定义',
-    punctuationHint: '请按当前文稿的编辑规范判断',
-  },
-};
-
-const CJK = /[\u2E80-\u2EFF\u2F00-\u2FDF\u3000-\u303F\u3040-\u30FF\u3100-\u312F\u3130-\u318F\u31A0-\u31BF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF\u{20000}-\u{2FA1F}\u{30000}-\u{323AF}]/u;
-const HAN_IDEOGRAPH = /[\u3005-\u3007\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u{20000}-\u{2FA1F}\u{30000}-\u{323AF}]/u;
-const LATIN_OR_DIGIT = /[A-Za-z0-9]/;
-const CJK_ADJACENCY_CLASS = '[ぁ-ゖァ-ー\\u32FF㍻-㍾\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF\\u{20000}-\\u{2FA1F}\\u{30000}-\\u{323AF}]';
-const CJK_TO_LATIN_BOUNDARY = new RegExp(
-  `${CJK_ADJACENCY_CLASS}(?=[0-9A-Za-z])`, 'gu'
-);
-const LATIN_TO_CJK_BOUNDARY = new RegExp(
-  `[0-9A-Za-z](?=${CJK_ADJACENCY_CLASS})`, 'gu'
-);
-const ASCII_PUNCT = /[,.;:!?]/;
-const ASCII_PUNCTUATION = /[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]/;
-const PUNCTUATION = new Set(Array.from(
-  '！？，。；：、…‥・．，｡､〝〞〟〃々〆〜～ー‐‑‒–—―：；？！·・･「」『』【】〔〕〈〉《》「」〘〙〚〛（）［］｛｝｢｣､｡﹐﹑﹒﹔﹕﹖﹗﹙﹚﹛﹜﹝﹞﹟﹠﹡﹣﹦﹨﹩﹪﹫ﹰﹱﹲﹳﹴ﹵ﹶﹷﹸﹹﹺﹻﹼﹽﹾﹿ,.!?;:()[]{}<>'
-));
-const DASH_PUNCTUATION = new Set(Array.from('‐‑‒–—―－'));
-const NON_COMPRESSIBLE_PUNCTUATION = new Set(Array.from('〜～'));
-const OPEN_TO_CLOSE = new Map([
-  ['（', '）'], ['「', '」'], ['『', '』'], ['【', '】'],
-  ['《', '》'], ['〈', '〉'], ['〔', '〕'], ['〖', '〗'],
-  ['〘', '〙'], ['〚', '〛'], ['(', ')'], ['[', ']'], ['{', '}'],
-]);
-const CLOSE_TO_OPEN = new Map(Array.from(OPEN_TO_CLOSE, ([o, c]) => [c, o]));
-
-const CATEGORY_ORDER = [
-  '段首标点', '段末标点', '半角标点', '连续标点',
-  '括号配对', '重复空格', '中西文空格', '中西文邻接',
+const REGEXES = [
+  /[ぁ-ゖァ-ー\u32FF㍻-㍾\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF](?=[0-9A-Za-z])/gu,
+  /[0-9A-Za-z](?=[ぁ-ゖァ-ー\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF])/gu,
 ];
-
-function addFinding(findings, category, message, sample, offset, paragraph) {
-  if (!findings[category]) findings[category] = [];
-  findings[category].push({ message, sample, offset, paragraph });
-}
-
-function excerpt(text, index, radius = 16) {
-  let start = Math.max(0, index - radius);
-  let end = Math.min(text.length, index + radius);
-  const startsWithLowSurrogate = start > 0 &&
-    text.charCodeAt(start) >= 0xDC00 && text.charCodeAt(start) <= 0xDFFF &&
-    text.charCodeAt(start - 1) >= 0xD800 && text.charCodeAt(start - 1) <= 0xDBFF;
-  const endsWithHighSurrogate = end < text.length &&
-    text.charCodeAt(end - 1) >= 0xD800 && text.charCodeAt(end - 1) <= 0xDBFF &&
-    text.charCodeAt(end) >= 0xDC00 && text.charCodeAt(end) <= 0xDFFF;
-  if (startsWithLowSurrogate) start++;
-  if (endsWithHighSurrogate) end--;
-  return text.slice(start, end)
-    .replace(/\r\n|\r|\n|\u2028|\u2029/g, '↵')
-    .replace(/\t/g, '⇥');
-}
-
-function createParagraphLookup(text) {
-  const starts = [0];
-  const breaks = /\r\n|\r|\n|\u2028|\u2029/g;
-  let match;
-  while ((match = breaks.exec(text)) !== null) {
-    starts.push(match.index + match[0].length);
-  }
-
-  return offset => {
-    const position = Math.max(0, Math.min(text.length, offset));
-    let low = 0;
-    let high = starts.length;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      if (starts[middle] <= position) low = middle + 1;
-      else high = middle;
-    }
-    return low;
-  };
-}
 
 function errorMessage(error) {
   return String(error && error.message ? error.message : error);
@@ -265,827 +33,316 @@ function nodeIdentity(node) {
   return node && node.handle !== undefined ? node.handle : node;
 }
 
-function isMasterEditableNode(node) {
-  const handle = node && node.handle !== undefined ? node.handle : node;
-  const editability = EditabilityInterfaceApi.fromNode(handle);
-  return EditabilityInterfaceApi.isMasterEditable(editability);
-}
-
 function getStoryText(story) {
   if (typeof story.text === 'string') return story.text;
   if (typeof story.getLength !== 'function' || typeof story.getText !== 'function') {
     throw new Error('Story 未返回可读取的文本字符串。');
   }
-
   const length = story.getLength();
   if (!Number.isInteger(length) || length < 0) {
-    throw new Error('Story 未返回有效的文本长度。');
+    throw new Error(`Story 返回了无效文本长度：${length}。`);
   }
   const text = story.getText(0, length);
   if (typeof text !== 'string' || text.length !== length) {
-    throw new Error('Story 未返回与文本长度匹配的字符串。');
+    throw new Error('Story.getText 返回的文本长度不匹配。');
   }
   return text;
 }
 
-function isCjk(ch) {
-  return !!ch && CJK.test(ch) && !PUNCTUATION.has(ch);
-}
-
-function isLatinOrDigit(ch) {
-  return !!ch && LATIN_OR_DIGIT.test(ch);
-}
-
-function isCompressiblePunctuation(ch) {
-  return PUNCTUATION.has(ch) &&
-    !ASCII_PUNCTUATION.test(ch) &&
-    !HAN_IDEOGRAPH.test(ch) &&
-    !DASH_PUNCTUATION.has(ch) &&
-    !NON_COMPRESSIBLE_PUNCTUATION.has(ch);
-}
-
-function codePoints(text) {
-  const points = [];
-  for (let offset = 0; offset < text.length;) {
-    const ch = String.fromCodePoint(text.codePointAt(offset));
-    points.push({ ch, offset, length: ch.length });
-    offset += ch.length;
-  }
-  return points;
-}
-
 function getNodeStoryText(node) {
   const storyInterface = node.storyInterface;
-  const story = storyInterface?.story || node.story;
-  const range = storyInterface?.storyRange || node.storyRange;
-  const end = range && Number.isInteger(range.end)
-    ? range.end
-    : range && Number.isInteger(range.begin) && Number.isInteger(range.length)
-      ? range.begin + range.length
-      : NaN;
-  if (!story ||
-      !range || !Number.isInteger(range.begin) || !Number.isInteger(end) ||
-      range.begin < 0 || end < range.begin) {
-    throw new Error('文本对象没有可读取的有效 StoryRange。');
-  }
+  const interfaceSource = storyInterface && {
+    story: storyInterface.story,
+    range: storyInterface.storyRange,
+    selectionNode: storyInterface.node || node,
+  };
+  const sources = [
+    { story: node.story, range: node.storyRange, selectionNode: node },
+    interfaceSource,
+  ].filter(source => source && source.story && source.range);
+  const failures = [];
 
-  const rangeLength = end - range.begin;
-  let storyText;
-  let storyTextError;
-  try {
-    storyText = getStoryText(story);
-  } catch (error) {
-    storyTextError = error;
-  }
-  if (typeof storyText === 'string' &&
-      range.begin <= storyText.length && end > storyText.length) {
-    return {
-      story,
-      begin: range.begin,
-      end: storyText.length,
-      text: storyText.slice(range.begin),
-    };
-  }
+  for (const source of sources) {
+    const { story, range, selectionNode } = source;
+    const end = Number.isInteger(range.end)
+      ? range.end
+      : Number.isInteger(range.begin) && Number.isInteger(range.length)
+        ? range.begin + range.length
+        : NaN;
+    if (!Number.isInteger(range.begin) || !Number.isInteger(end) ||
+        range.begin < 0 || end < range.begin) {
+      failures.push('StoryRange 无效');
+      continue;
+    }
 
-  let rangeReadError;
-  let rangeReadLength = null;
-  if (typeof story.getText === 'function') {
+    const rangeLength = end - range.begin;
     try {
-      const rangeText = story.getText(range.begin, rangeLength);
-      if (typeof rangeText === 'string' && rangeText.length === rangeLength &&
-          (typeof storyText !== 'string' || end <= storyText.length)) {
+      const text = story.getText(range.begin, rangeLength);
+      if (typeof text === 'string' && text.length === rangeLength) {
+        const sameInterfaceRange = interfaceSource &&
+          interfaceSource.range &&
+          storyIdentity(interfaceSource.story) === storyIdentity(story) &&
+          interfaceSource.range.begin === range.begin &&
+          (Number.isInteger(interfaceSource.range.end)
+            ? interfaceSource.range.end
+            : interfaceSource.range.begin + interfaceSource.range.length) === end;
+        const fallbackNode = selectionNode === node && sameInterfaceRange
+          ? interfaceSource.selectionNode
+          : null;
         return {
           story,
           begin: range.begin,
           end,
-          text: rangeText,
+          text,
+          selectionNode,
+          fallbackNode,
         };
       }
-      if (typeof rangeText === 'string') {
-        rangeReadLength = rangeText.length;
-        rangeReadError = new Error(
-          end > storyText?.length
-            ? 'Story.getText 返回范围超出可读 Story 文本长度。'
-            : 'Story.getText 返回的文本长度与 StoryRange 不匹配。'
-        );
-      }
-    } catch (error) {
-      rangeReadError = error;
-    }
-  }
-
-  if (typeof storyText !== 'string') {
-    if (rangeReadError) {
-      throw new Error(
-        `Story 文本不可用：${errorMessage(storyTextError)}；` +
-        `StoryRange 读取失败：${errorMessage(rangeReadError)}`
+      failures.push(
+        `Story.getText 长度不匹配（应为 ${rangeLength}，实际为 ${text?.length ?? '无效'}）`
       );
+    } catch (error) {
+      failures.push(`StoryRange 读取失败：${errorMessage(error)}`);
     }
-    throw storyTextError;
+
+    try {
+      const fullText = getStoryText(story);
+      if (fullText.length >= end) {
+        const text = fullText.slice(range.begin, end);
+        if (text.length === rangeLength) {
+          return {
+            story,
+            begin: range.begin,
+            end,
+            text,
+            selectionNode,
+            fallbackNode: null,
+          };
+        }
+      }
+      failures.push('Story 全文与 StoryRange 坐标不一致');
+    } catch (error) {
+      failures.push(`Story 全文读取失败：${errorMessage(error)}`);
+    }
   }
 
-  if (storyText.length >= end) {
-    return {
-      story,
-      begin: range.begin,
-      end,
-      text: storyText.slice(range.begin, end),
-    };
-  }
-  if (storyText.length === rangeLength) {
-    return { story, begin: range.begin, end, text: storyText };
-  }
-  if (range.begin <= storyText.length && end === storyText.length + 1) {
-    return {
-      story,
-      begin: range.begin,
-      end: storyText.length,
-      text: storyText.slice(range.begin),
-    };
-  }
-  if (rangeReadError) {
-    const actualLength = rangeReadLength === null
-      ? '不可用'
-      : String(rangeReadLength);
-    throw new Error(
-      `无法读取 StoryRange 文本：范围 [${range.begin}, ${end}) 长度为 ${rangeLength}，` +
-      `Story 文本长度为 ${storyText.length}，Story.getText 返回长度为 ${actualLength}；` +
-      `${errorMessage(rangeReadError)}`
-    );
-  }
   throw new Error(
-    `Story 文本长度 ${storyText.length} 与范围 [${range.begin}, ${end}) ` +
-    `（长度 ${rangeLength}）不匹配。`
+    `无法取得与格式目标对齐的 Story 文本：${failures.join('；') || '无可用范围'}`
   );
 }
 
 function collectDocumentTextNodes(doc) {
   const roots = [];
   const errors = [];
-  for (const [label, getCollection, optional] of [
-    ['文档页面', () => doc.spreads, false],
-    ['母版页', () => doc.masterSpreads, true],
+  for (const [collectionName, label, optional] of [
+    ['spreads', '页面', false],
+    ['masterSpreads', '母版页', true],
   ]) {
     try {
-      const collection = getCollection();
+      const collection = doc[collectionName];
       if (optional && (collection === undefined || collection === null)) continue;
       if (!collection || typeof collection.toArray !== 'function') {
-        throw new Error('SDK 未返回有效的节点集合。');
+        throw new Error('SDK 未返回有效节点集合。');
       }
-      const isMasterSpread = label === '母版页';
-      for (const node of collection.toArray()) roots.push({ node, isMasterSpread });
+      for (const node of collection.toArray()) roots.push({ node, label });
     } catch (error) {
       errors.push(`读取${label}列表失败：${errorMessage(error)}`);
     }
   }
 
-  const textNodes = [];
+  const nodes = [];
   const visited = new Set();
-  while (roots.length) {
-    const root = roots.pop();
-    const node = root.node;
+  for (let cursor = 0; cursor < roots.length; cursor++) {
+    const { node, label } = roots[cursor];
     if (!node) continue;
-    let identity = node;
-    try {
-      identity = nodeIdentity(node);
-    } catch (error) {
-      errors.push(`读取节点标识失败：${errorMessage(error)}`);
-    }
+    const identity = nodeIdentity(node);
     if (visited.has(identity)) continue;
     visited.add(identity);
 
     try {
-      if (node.isTextNode) {
-        textNodes.push({ node, isMasterSpread: root.isMasterSpread });
-      }
+      if (node.isTextNode) nodes.push({ node, label: `${label}文本对象 ${nodes.length + 1}` });
     } catch (error) {
       errors.push(`读取文本节点属性失败：${errorMessage(error)}`);
     }
+
     try {
       const children = node.children;
-      if (!children || typeof children.toArray !== 'function') {
-        throw new Error('SDK 未返回有效的子节点集合。');
-      }
-      for (const child of children.toArray()) {
-        roots.push({ node: child, isMasterSpread: root.isMasterSpread });
+      if (children && typeof children.toArray === 'function') {
+        for (const child of children.toArray()) roots.push({ node: child, label });
+      } else if (children) {
+        throw new Error('SDK 未返回有效子节点集合。');
       }
     } catch (error) {
       errors.push(`读取节点子项失败：${errorMessage(error)}`);
     }
   }
-  return { textNodes, errors };
+  return { nodes, errors };
 }
 
-function requestScanScope() {
-  const dialog = Dialog.create(`Affinity CJK Typography Toolkit ${VERSION}`);
-  dialog.initialWidth = 420;
-  const column = dialog.addColumn();
-  const scopeGroup = column.addGroup('文本查询范围');
-  const scope = scopeGroup.addRadioGroup(
-    '扫描范围',
-    ['选取项', '文档'],
-    0
-  );
-  scopeGroup.addStaticText(
-    '“选取项”仅扫描当前选中的文本对象；“文档”扫描页面与母版页中的文本对象。'
-  );
-
-  const result = dialog.runModal();
-  if (result.value !== DialogResult.Ok.value) return null;
-  if (scope.selectedIndex === 0) return 'selection';
-  if (scope.selectedIndex === 1) return 'document';
-  throw new Error(`无效的文本查询范围索引：${scope.selectedIndex}`);
-}
-
-function findCjkLatinBoundaries(node, text, nodeRange = getNodeStoryText(node)) {
-  const { story, begin } = nodeRange;
+function collectRegexTargets(nodes, errors) {
   const targets = [];
+  const seen = new Map();
+  let matchCount = 0;
+  let alreadyAppliedCount = 0;
 
-  for (const pattern of [CJK_TO_LATIN_BOUNDARY, LATIN_TO_CJK_BOUNDARY]) {
-    pattern.lastIndex = 0;
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      const rightOffset = match.index + match[0].length;
-      const rightCodePoint = text.codePointAt(rightOffset);
-      if (rightCodePoint === undefined) continue;
-      const rightCharacter = String.fromCodePoint(rightCodePoint);
-      targets.push({
-        node,
-        story,
-        begin: begin + match.index,
-        end: begin + match.index + match[0].length,
-        sample: `${match[0]}${rightCharacter}`,
-      });
-    }
-  }
-  return targets;
-}
+  for (const item of nodes) {
+    try {
+      const range = getNodeStoryText(item.node);
+      for (const regex of REGEXES) {
+        regex.lastIndex = 0;
+        let match;
+        while ((match = regex.exec(range.text)) !== null) {
+          const begin = range.begin + match.index;
+          const end = begin + match[0].length;
+          let storyTargets = seen.get(storyIdentity(range.story));
+          if (!storyTargets) {
+            storyTargets = new Set();
+            seen.set(storyIdentity(range.story), storyTargets);
+          }
+          const key = `${begin}:${end}`;
+          if (storyTargets.has(key)) continue;
+          storyTargets.add(key);
+          matchCount++;
 
-function requestTypographyOptions(counts) {
-  const dialog = Dialog.create(`Affinity CJK Typography Toolkit ${VERSION}`);
-  dialog.initialWidth = 520;
+          const actualText = range.story.getText(begin, end - begin);
+          if (actualText !== match[0]) {
+            errors.push(
+              `${item.label}，索引 ${begin}：正则命中“${match[0]}”，` +
+              `但 StoryRange 对应“${String(actualText)}”；已跳过以避免错位。`
+            );
+            continue;
+          }
 
-  const column = dialog.addColumn();
-  const kerningGroup = column.addGroup('中西文 Kerning 字偶距');
-  const applyKerning = kerningGroup.addCheckBox(
-    `调整 ${counts.cjkLatin} 处中西文相邻字符间的 Kerning`,
-    false
-  );
-  const kerningAmount = kerningGroup.addUnitValueEditor(
-    'Kerning 字偶距增量（em）',
-    UnitType.Number,
-    UnitType.Number,
-    0.25,
-    -0.5,
-    0.5
-  );
-  kerningAmount.precision = 3;
-  applyKerning.isEnabled = counts.cjkLatin > 0;
-  kerningAmount.isEnabled = counts.cjkLatin > 0;
+          try {
+            const glyphAtts = range.story.getGlyphAtts(begin);
+            const currentTracking =
+              glyphAtts.getDoubleValue(GlyphAttDoubleType.CharacterSpacing);
+            if (!Number.isFinite(currentTracking)) {
+              throw new Error('Tracking 不是有效数值。');
+            }
+            if (currentTracking === TRACKING) {
+              alreadyAppliedCount++;
+              continue;
+            }
+          } catch (error) {
+            errors.push(
+              `${item.label}，索引 ${begin} “${match[0]}”无法读取 Tracking：` +
+              `${errorMessage(error)}`
+            );
+            continue;
+          }
 
-  const runGroup = column.addGroup('连续标点 Tracking 挤压');
-  const applyRuns = runGroup.addCheckBox(
-    `压缩 ${counts.punctuationRuns} 处连续标点间距${counts.punctuationSample ? `（如“${counts.punctuationSample}”）` : ''}`,
-    false
-  );
-  const runAmount = runGroup.addUnitValueEditor(
-    '每对标点 Tracking 增量（em）',
-    UnitType.Number,
-    UnitType.Number,
-    -0.5,
-    -1,
-    0
-  );
-  runAmount.precision = 3;
-  applyRuns.isEnabled = counts.punctuationRuns > 0;
-  runAmount.isEnabled = counts.punctuationRuns > 0;
-  runGroup.addStaticText(
-    '仅处理紧挨且无空格的标点对（如“！！”“？！”）；空格或换行会分隔标点。'
-  );
-  const resetGroup = column.addGroup('修复已有字距');
-  const resetSpacing = resetGroup.addCheckBox(
-    `将 ${counts.resetRanges} 个所选文本范围的字符间距和字偶距归零`,
-    false
-  );
-  resetSpacing.isEnabled = counts.resetRanges > 0;
-  resetGroup.addStaticText(
-    '会清除所选范围内原有的手工字距；建议先复制文档。'
-  );
-  if (counts.cjkLatin + counts.punctuationRuns + counts.resetRanges === 0) {
-    column.addGroup('扫描状态').addStaticText(
-      '当前没有可应用的调整目标；请检查扫描结果中的处理异常。'
-    );
-  }
-
-  const result = dialog.runModal();
-  if (result.value !== DialogResult.Ok.value) return null;
-  return {
-    applyKerning: applyKerning.value,
-    kerningAmount: Number(kerningAmount.value),
-    applyRuns: applyRuns.value,
-    runAmount: Number(runAmount.value),
-    resetSpacing: resetSpacing.value,
-  };
-}
-
-function findConsecutivePunctuationTargets(node, text, nodeRange = getNodeStoryText(node)) {
-  const { story, begin } = nodeRange;
-  const points = codePoints(text)
-    .map(point => ({ ...point, offset: point.offset + begin }));
-  const targets = [];
-  const dotPunctuation = new Set(Array.from('，、。？！；：'));
-  for (let i = 0; i < points.length; i++) {
-    if ((points[i].ch === '”' || points[i].ch === '’') &&
-        dotPunctuation.has(points[i + 1]?.ch)) {
-      targets.push({
-        node,
-        story,
-        begin: points[i].offset,
-        end: points[i].offset + points[i].length,
-        sample: `${points[i].ch}${points[i + 1].ch}`,
-      });
-    }
-  }
-  for (let i = 0; i + 1 < points.length;) {
-    if (!isCompressiblePunctuation(points[i].ch)) {
-      i++;
-      continue;
-    }
-    let end = i + 1;
-    while (end < points.length && isCompressiblePunctuation(points[end].ch)) end++;
-    if (end - i > 1) {
-      const ellipsisIndexes = new Set();
-      for (let j = i; j < end; j++) {
-        if (points[j].ch === '…' || points[j].ch === '‥') {
-          ellipsisIndexes.add(j);
+          targets.push({
+            node: range.selectionNode,
+            fallbackNode: range.fallbackNode,
+            story: range.story,
+            begin,
+            end,
+            sample: match[0],
+            label: item.label,
+          });
         }
-        if (points[j].ch !== '.' && points[j].ch !== '．') continue;
-        let periodEnd = j + 1;
-        while (periodEnd < end &&
-            (points[periodEnd].ch === '.' || points[periodEnd].ch === '．')) {
-          periodEnd++;
-        }
-        if (periodEnd - j >= 3) {
-          for (let k = j; k < periodEnd; k++) ellipsisIndexes.add(k);
-        }
-        j = periodEnd - 1;
       }
-      for (let j = i; j < end - 1; j++) {
-        if (ellipsisIndexes.has(j) || ellipsisIndexes.has(j + 1)) continue;
-        targets.push({
-          node,
-          story,
-          begin: points[j].offset,
-          end: points[j].offset + points[j].length,
-          sample: `${points[j].ch}${points[j + 1].ch}`,
-        });
-      }
-    }
-    i = end;
-  }
-  return targets;
-}
-
-function collectFormattingTargets(targets, lookup, candidates, attribute, amount) {
-  for (const candidate of candidates) {
-    const identity = storyIdentity(candidate.story);
-    let nodeTargets = lookup.get(identity);
-    if (!nodeTargets) {
-      nodeTargets = new Map();
-      lookup.set(identity, nodeTargets);
-    }
-    const ownerIdentity = nodeIdentity(candidate.node);
-    let storyTargets = nodeTargets.get(ownerIdentity);
-    if (!storyTargets) {
-      storyTargets = new Map();
-      nodeTargets.set(ownerIdentity, storyTargets);
-    }
-    const key = `${candidate.begin}:${candidate.end}:${attribute}`;
-    if (!storyTargets.has(key)) {
-      const target = { ...candidate, attribute, amount };
-      targets.push(target);
-      storyTargets.set(key, target);
+    } catch (error) {
+      errors.push(`${item.label}：${errorMessage(error)}`);
     }
   }
+  return { targets, matchCount, alreadyAppliedCount };
 }
 
-function collectResetTargets(targets, ranges) {
-  for (const range of ranges) {
-    for (const attribute of [
-      GlyphAttDoubleType.CharacterSpacing,
-      GlyphAttDoubleType.ManualKerning,
-    ]) {
-      targets.push({ ...range, attribute, value: 0 });
-    }
-  }
-}
-
-function createFormattingCommand(doc, target, value) {
-  const selection = Selection.create(doc, target.node);
+function createFormattingCommand(doc, target, node) {
+  const selection = Selection.create(doc, node);
   selection.addSubSelectionForNode(
-    target.node,
+    node,
     TextSelection.create([new StoryRange(target.begin, target.end)])
   );
   return DocumentCommand.createFormatText(
     selection,
-    StoryDelta.createGlyphDouble(target.attribute, value)
+    StoryDelta.createGlyphDouble(
+      GlyphAttDoubleType.CharacterSpacing,
+      TRACKING
+    )
   );
 }
 
-function applyTypographyAdjustments(doc, targets, errors) {
-  const builder = CompoundCommandBuilder.create();
-  const storyLengths = new Map();
-  const nodeGroups = new Map();
-  let succeeded = false;
-  let usedFallback = false;
-  let resetCommandCount = 0;
-  const applied = {
-    [GlyphAttDoubleType.CharacterSpacing]: 0,
-    [GlyphAttDoubleType.ManualKerning]: 0,
-  };
-  let queuedResetCommandCount = 0;
-
-  for (const target of targets) {
+function executeTarget(doc, target) {
+  try {
+    doc.executeCommand(createFormattingCommand(doc, target, target.node));
+    return;
+  } catch (primaryError) {
+    if (!target.fallbackNode ||
+        nodeIdentity(target.fallbackNode) === nodeIdentity(target.node)) {
+      throw primaryError;
+    }
     try {
-      const identity = storyIdentity(target.story);
-      let storyLength = storyLengths.get(identity);
-      if (storyLength === undefined) {
-        storyLength = getStoryText(target.story).length;
-        storyLengths.set(identity, storyLength);
-      }
-      if (!Number.isInteger(target.begin) || !Number.isInteger(target.end) ||
-          target.begin < 0 || target.end <= target.begin || target.end > storyLength) {
-        throw new Error(
-          `目标范围 [${target.begin}, ${target.end}) 超出 Story 文本长度 ${storyLength}。`
-        );
-      }
-
-      let value = target.value;
-      if (value === undefined) {
-        const glyphAtts = target.story.getGlyphAtts(target.begin);
-        const current = target.attribute === GlyphAttDoubleType.ManualKerning
-          ? glyphAtts.manualKerning
-          : glyphAtts.getDoubleValue(target.attribute);
-        if (!Number.isFinite(current)) {
-          throw new Error('当前字距属性不是有效数值。');
-        }
-        value = current + target.amount;
-      }
-      if (!Number.isFinite(value)) {
-        throw new Error('目标字距属性不是有效数值。');
-      }
-
-      const ownerIdentity = nodeIdentity(target.node);
-      let group = nodeGroups.get(ownerIdentity);
-      if (!group) {
-        group = {
-          label: target.label || '文本对象',
-          builder: CompoundCommandBuilder.create(),
-          applied: {
-            [GlyphAttDoubleType.CharacterSpacing]: 0,
-            [GlyphAttDoubleType.ManualKerning]: 0,
-          },
-          commands: [],
-          resetCommandCount: 0,
-        };
-        nodeGroups.set(ownerIdentity, group);
-      }
-      builder.addCommand(createFormattingCommand(doc, target, value));
-      group.builder.addCommand(createFormattingCommand(doc, target, value));
-      group.applied[target.attribute]++;
-      group.commands.push({ target, value });
-      if (target.value !== undefined) group.resetCommandCount++;
-    } catch (error) {
-      errors.push(
-        `排版调整（${target.label || '文本对象'}，索引 ${target.begin}）：${errorMessage(error)}`
+      doc.executeCommand(
+        createFormattingCommand(doc, target, target.fallbackNode)
+      );
+    } catch (fallbackError) {
+      throw new Error(
+        `文档节点失败：${errorMessage(primaryError)}；` +
+        `StoryInterface 节点失败：${errorMessage(fallbackError)}`
       );
     }
   }
+}
 
-  const commandCount = Array.from(nodeGroups.values()).reduce(
-    (count, group) =>
-      count + group.applied[GlyphAttDoubleType.CharacterSpacing] +
-      group.applied[GlyphAttDoubleType.ManualKerning],
-    0
-  );
-  queuedResetCommandCount = Array.from(nodeGroups.values())
-    .reduce((count, group) => count + group.resetCommandCount, 0);
-  if (commandCount > 0) {
+function applyRegexTargets(doc, targets, errors) {
+  const groups = new Map();
+  for (const target of targets) {
+    const identity = nodeIdentity(target.node);
+    let group = groups.get(identity);
+    if (!group) {
+      group = { label: target.label, targets: [] };
+      groups.set(identity, group);
+    }
+    group.targets.push(target);
+  }
+
+  let appliedCount = 0;
+  for (const group of groups.values()) {
+    const builder = CompoundCommandBuilder.create();
+    const validTargets = [];
+    for (const target of group.targets) {
+      try {
+        builder.addCommand(
+          createFormattingCommand(doc, target, target.node)
+        );
+        validTargets.push(target);
+      } catch (error) {
+        errors.push(
+          `${target.label}，索引 ${target.begin} “${target.sample}”：` +
+          `${errorMessage(error)}`
+        );
+      }
+    }
+    if (!validTargets.length) continue;
+
     try {
       doc.executeCommand(builder.createCommand());
-      succeeded = true;
-      for (const group of nodeGroups.values()) {
-        applied[GlyphAttDoubleType.CharacterSpacing] +=
-          group.applied[GlyphAttDoubleType.CharacterSpacing];
-        applied[GlyphAttDoubleType.ManualKerning] +=
-          group.applied[GlyphAttDoubleType.ManualKerning];
-      }
-      resetCommandCount = queuedResetCommandCount;
-    } catch (error) {
-      usedFallback = true;
+      appliedCount += validTargets.length;
+    } catch (batchError) {
       errors.push(
-        `批量执行排版调整失败，正在逐文本对象重试：${errorMessage(error)}`
+        `${group.label}批量调整失败，改为逐个正则匹配项重试：` +
+        `${errorMessage(batchError)}`
       );
-      for (const group of nodeGroups.values()) {
+      for (const target of validTargets) {
         try {
-          doc.executeCommand(group.builder.createCommand());
-          succeeded = true;
-          applied[GlyphAttDoubleType.CharacterSpacing] +=
-            group.applied[GlyphAttDoubleType.CharacterSpacing];
-          applied[GlyphAttDoubleType.ManualKerning] +=
-            group.applied[GlyphAttDoubleType.ManualKerning];
-          resetCommandCount += group.resetCommandCount;
-        } catch (groupError) {
+          executeTarget(doc, target);
+          appliedCount++;
+        } catch (error) {
           errors.push(
-            `排版调整（${group.label}）批量失败，正在逐位置重试：${errorMessage(groupError)}`
+            `${target.label}，索引 ${target.begin} “${target.sample}”：` +
+            `${errorMessage(error)}`
           );
-          for (const { target, value } of group.commands) {
-            try {
-              doc.executeCommand(createFormattingCommand(doc, target, value));
-              succeeded = true;
-              applied[target.attribute]++;
-              if (target.value !== undefined) resetCommandCount++;
-            } catch (targetError) {
-              errors.push(
-                `排版调整（${group.label}，索引 ${target.begin}）失败：${errorMessage(targetError)}`
-              );
-            }
-          }
         }
       }
     }
   }
-  return {
-    ...applied,
-    commandCount: applied[GlyphAttDoubleType.CharacterSpacing] +
-      applied[GlyphAttDoubleType.ManualKerning],
-    resetCommandCount,
-    succeeded,
-    usedFallback,
-  };
-}
-
-function scanParagraphBoundaries(text, label, findings) {
-  const breakPattern = /\r\n|\r|\n|\u2028|\u2029/g;
-  let start = 0;
-  let paragraphNumber = 1;
-  let match;
-
-  function inspectParagraph(paragraph, paragraphStart, number) {
-    const leading = paragraph.match(/^\s*/u)?.[0].length || 0;
-    const trimmed = paragraph.trim();
-    if (!trimmed) return;
-
-    const trimmedPoints = Array.from(trimmed);
-    const first = trimmedPoints[0];
-    const last = trimmedPoints[trimmedPoints.length - 1];
-    const startOffset = paragraphStart + leading;
-    const endOffset = paragraphStart + paragraph.trimEnd().length - 1;
-
-    if (/[，。！？；：、,.!?;:）】》」』]/u.test(first)) {
-      addFinding(
-        findings, '段首标点',
-        `第 ${number} 段以标点或闭合符号开头；请检查是否为有意分段`,
-        `${label}: “${trimmed.slice(0, 28)}”`,
-        startOffset, number
-      );
-    }
-    if (/[（【《「『([{〔〖〘〚]/u.test(last)) {
-      addFinding(
-        findings, '段末标点',
-        `第 ${number} 段以开括号或开引号结尾；请检查是否为有意分段`,
-        `${label}: “${trimmed.slice(-28)}”`,
-        endOffset, number
-      );
-    }
-  }
-
-  while ((match = breakPattern.exec(text)) !== null) {
-    inspectParagraph(text.slice(start, match.index), start, paragraphNumber);
-    start = match.index + match[0].length;
-    paragraphNumber++;
-  }
-  inspectParagraph(text.slice(start), start, paragraphNumber);
-}
-
-function scanBrackets(text, label, findings, paragraphAtOffset) {
-  const stack = [];
-  let paragraphStart = 0;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (OPEN_TO_CLOSE.has(ch)) {
-      const continuedDialogueQuote = ch === '「' &&
-        stack.some(item => item.ch === '「') &&
-        text.slice(paragraphStart, i).trim() === '';
-      if (!continuedDialogueQuote) {
-        stack.push({ ch, expected: OPEN_TO_CLOSE.get(ch), offset: i });
-      }
-    } else if (CLOSE_TO_OPEN.has(ch)) {
-      const expectedOpen = CLOSE_TO_OPEN.get(ch);
-      const top = stack[stack.length - 1];
-      if (!top || top.ch !== expectedOpen) {
-        addFinding(
-          findings, '括号配对',
-          `位置 ${i} 出现未匹配或顺序异常的闭合符号 “${ch}”`,
-          `${label}: “…${excerpt(text, i)}…”`,
-          i, paragraphAtOffset(i)
-        );
-      } else {
-        stack.pop();
-      }
-    }
-    if (ch === '\r' || ch === '\n' || ch === '\u2028' || ch === '\u2029') {
-      paragraphStart = i + 1;
-    }
-  }
-
-  for (const item of stack) {
-    addFinding(
-      findings, '括号配对',
-      `位置 ${item.offset} 的开符号 “${item.ch}” 尚未找到对应的 “${item.expected}”`,
-      `${label}: “…${excerpt(text, item.offset)}…”`,
-      item.offset, paragraphAtOffset(item.offset)
-    );
-  }
-}
-
-function scanStory(text, label, findings) {
-  if (!text || !text.length) return;
-  const paragraphAtOffset = createParagraphLookup(text);
-
-  if (CONFIG.checkParagraphBoundaries) {
-    scanParagraphBoundaries(text, label, findings);
-  }
-
-  const points = codePoints(text);
-  if (CONFIG.cjkLatinAdjacency !== 'ignore') {
-    for (let i = 1; i < points.length; i++) {
-      const left = points[i - 1].ch;
-      const right = points[i].ch;
-      if ((isCjk(left) && isLatinOrDigit(right)) ||
-          (isLatinOrDigit(left) && isCjk(right))) {
-        addFinding(
-          findings, '中西文邻接',
-          '中文与 Latin/数字直接相邻；可按字体、字号和版面密度检查视觉字距',
-          `${label}: “…${excerpt(text, points[i].offset)}…”`,
-          points[i].offset, paragraphAtOffset(points[i].offset)
-        );
-      }
-    }
-  }
-
-  // Whitespace is policy-dependent: do not silently remove it.
-  for (let i = 0; i < points.length; i++) {
-    if (points[i].ch !== ' ' && points[i].ch !== '\u3000') continue;
-    const left = points[i - 1]?.ch || '';
-    const right = points[i + 1]?.ch || '';
-    const cjkLatinBoundary =
-      (isCjk(left) && isLatinOrDigit(right)) ||
-      (isLatinOrDigit(left) && isCjk(right));
-
-    if (cjkLatinBoundary && CONFIG.cjkLatinSpacePolicy !== 'ignore') {
-      const isStrict = CONFIG.cjkLatinSpacePolicy === 'strict-no-space';
-      addFinding(
-        findings, '中西文空格',
-        isStrict
-          ? '当前规则集将中西文之间的空格列为待处理项'
-          : '中西文之间存在空格；这属于版式规范选择，请按全文规则统一',
-        `${label}: “…${excerpt(text, points[i].offset)}…”`,
-        points[i].offset, paragraphAtOffset(points[i].offset)
-      );
-    } else if (isCjk(left) && isCjk(right)) {
-      addFinding(
-        findings, '中西文空格',
-        '两个 CJK 字符之间出现空格；请确认是否为有意留白',
-        `${label}: “…${excerpt(text, points[i].offset)}…”`,
-        points[i].offset, paragraphAtOffset(points[i].offset)
-      );
-    }
-  }
-
-  if (CONFIG.checkRepeatedSpaces) {
-    const repeated = /[ \u3000]{2,}/g;
-    let match;
-    while ((match = repeated.exec(text)) !== null) {
-      addFinding(
-        findings, '重复空格',
-        `发现连续空格（${match[0].length} 个）；请检查是否为手工对齐或误输入`,
-        `${label}: “…${excerpt(text, match.index)}…”`,
-        match.index, paragraphAtOffset(match.index)
-      );
-    }
-  }
-
-  if (CONFIG.checkAsciiPunctuation) {
-    for (let i = 0; i < points.length; i++) {
-      const point = points[i];
-      if (!ASCII_PUNCT.test(point.ch)) continue;
-      const left = points[i - 1]?.ch || '';
-      const right = points[i + 1]?.ch || '';
-      if (isCjk(left) || isCjk(right)) {
-        addFinding(
-          findings, '半角标点',
-          `半角标点 “${point.ch}” 与 CJK 字符相邻。${(PROFILES[CONFIG.profile] || PROFILES.custom).punctuationHint}`,
-          `${label}: “…${excerpt(text, point.offset)}…”`,
-          point.offset, paragraphAtOffset(point.offset)
-        );
-      }
-    }
-  }
-
-  if (CONFIG.checkRepeatedPunctuation) {
-    const repeated = /([，。！？；：、])\1+/gu;
-    let match;
-    while ((match = repeated.exec(text)) !== null) {
-      addFinding(
-        findings, '连续标点',
-        `发现连续标点 “${match[0]}”；请确认是否为有意表达`,
-        `${label}: “…${excerpt(text, match.index)}…”`,
-        match.index, paragraphAtOffset(match.index)
-      );
-    }
-  }
-
-  if (CONFIG.checkBracketPairs) {
-    scanBrackets(text, label, findings, paragraphAtOffset);
-  }
-}
-
-function formatReport(findings, scannedStories, scannedChars, errors, formattingSummary, scanScope) {
-  let total = 0;
-  for (const key of Object.keys(findings)) total += findings[key].length;
-
-  const profile = PROFILES[CONFIG.profile] || PROFILES.custom;
-  let report = `Affinity CJK Typography Toolkit ${VERSION}\n`;
-  report += `规则集：${profile.label}\n`;
-  report += `扫描范围：${scanScope === 'document' ? '文档' : '选取项'}\n`;
-  report += `扫描文本故事：${scannedStories} 个\n扫描字符：${scannedChars}\n发现项目：${total}\n`;
-  report += `\n说明：排版调整须在对话框中勾选；通常合并为一次可撤销操作。批量命令失败时会按文本对象隔离重试。\n`;
-  report += `位置采用文本字符串的 UTF-16 索引，并同时标注段落序号。\n`;
-  report += `中西文空格与邻接提示受 CONFIG 中的策略设置影响。\n`;
-  if (formattingSummary) report += `${formattingSummary}\n`;
-
-  for (const category of CATEGORY_ORDER) {
-    const items = findings[category];
-    if (!items || !items.length) continue;
-    report += `\n【${category}】${items.length} 项\n`;
-    const shown = items.slice(0, CONFIG.maxExamplesPerCategory);
-    for (const item of shown) {
-      const where = item.offset === undefined
-        ? ''
-        : `（索引 ${item.offset}，第 ${item.paragraph || '?'} 段）`;
-      report += `• ${item.message}${where}\n  ${item.sample}\n`;
-    }
-    if (items.length > shown.length) {
-      report += `…另有 ${items.length - shown.length} 项未显示\n`;
-    }
-  }
-
-  if (errors.length) {
-    report += `\n【处理异常】${errors.length} 项\n`;
-    for (const error of errors) report += `• ${error}\n`;
-  }
-  if (!total && !errors.length) report += `\n未发现本工具当前规则覆盖的问题。`;
-  return report;
-}
-
-function validateConfig() {
-  const errors = [];
-  if (!Object.prototype.hasOwnProperty.call(PROFILES, CONFIG.profile)) {
-    errors.push(`profile “${CONFIG.profile}” 不受支持。`);
-  }
-  if (!['review', 'ignore', 'strict-no-space'].includes(CONFIG.cjkLatinSpacePolicy)) {
-    errors.push(`cjkLatinSpacePolicy “${CONFIG.cjkLatinSpacePolicy}” 不受支持。`);
-  }
-  if (!['review', 'ignore'].includes(CONFIG.cjkLatinAdjacency)) {
-    errors.push(`cjkLatinAdjacency “${CONFIG.cjkLatinAdjacency}” 不受支持。`);
-  }
-  if (!Number.isInteger(CONFIG.maxExamplesPerCategory) ||
-      CONFIG.maxExamplesPerCategory < 0) {
-    errors.push('maxExamplesPerCategory 必须是大于或等于 0 的整数。');
-  }
-  for (const key of [
-    'scanLinkedStoryOnce',
-    'checkAsciiPunctuation',
-    'checkRepeatedPunctuation',
-    'checkBracketPairs',
-    'checkParagraphBoundaries',
-    'checkRepeatedSpaces',
-  ]) {
-    if (typeof CONFIG[key] !== 'boolean') {
-      errors.push(`${key} 必须是布尔值。`);
-    }
-  }
-  return errors;
+  return appliedCount;
 }
 
 function main() {
-  const configErrors = validateConfig();
-  if (configErrors.length) {
-    alert(`CONFIG 配置无效：\n• ${configErrors.join('\n• ')}`);
-    return;
-  }
-
   let doc;
   try {
     doc = Document.current;
@@ -1098,246 +355,27 @@ function main() {
     return;
   }
 
-  let scanScope;
-  try {
-    scanScope = requestScanScope();
-  } catch (error) {
-    alert(`无法选择文本查询范围：${errorMessage(error)}`);
-    return;
-  }
-  if (!scanScope) return;
-
-  let textNodes = [];
-  const collectionErrors = [];
-  if (scanScope === 'selection') {
-    try {
-      const selectedNodes = doc.selection.nodes.toArray();
-      for (let index = 0; index < selectedNodes.length; index++) {
-        const node = selectedNodes[index];
-        try {
-          if (node.isTextNode) {
-            textNodes.push({
-              node,
-              label: `文本对象 ${textNodes.length + 1}`,
-              isMasterSpread: false,
-            });
-          }
-        } catch (error) {
-          collectionErrors.push(
-            `读取选取项 ${index + 1} 的文本节点属性失败：${errorMessage(error)}`
-          );
-        }
-      }
-    } catch (error) {
-      collectionErrors.push(`读取当前选取项失败：${errorMessage(error)}`);
-    }
-  } else {
-    const collection = collectDocumentTextNodes(doc);
-    for (const error of collection.errors) collectionErrors.push(error);
-    textNodes = collection.textNodes.map(({ node, isMasterSpread }, index) => ({
-      node,
-      label: `文档文本对象 ${index + 1}`,
-      isMasterSpread,
-    }));
-  }
-  if (!textNodes.length) {
-    const message = scanScope === 'document'
-      ? '文档中没有可扫描的文本对象。'
-      : '请先选择一个或多个文本对象（文本框或艺术字）。';
-    alert(collectionErrors.length
-      ? `${message}\n${collectionErrors.join('\n')}`
-      : message);
+  const collection = collectDocumentTextNodes(doc);
+  const errors = [...collection.errors];
+  if (!collection.nodes.length) {
+    const message = '文档中没有可扫描的文本对象。';
+    alert(errors.length ? `${message}\n${errors.join('\n')}` : message);
     return;
   }
 
-  const seenStories = new Set();
-  const findings = {};
-  const errors = [...collectionErrors];
-  const formattingNodes = [];
-  let scannedStories = 0;
-  let scannedChars = 0;
-
-  for (let i = 0; i < textNodes.length; i++) {
-    try {
-      const { node, label } = textNodes[i];
-      const story = node.storyInterface?.story || node.story;
-      if (!story) {
-        errors.push(`${label} 没有可读取的 Story。`);
-        continue;
-      }
-      const identity = storyIdentity(story);
-      if (!CONFIG.scanLinkedStoryOnce || !seenStories.has(identity)) {
-        const text = getStoryText(story);
-        scanStory(text, label, findings);
-        seenStories.add(identity);
-        scannedStories++;
-        scannedChars += Array.from(text).length;
-      }
-      formattingNodes.push({
-        node,
-        label,
-        isMasterSpread: textNodes[i].isMasterSpread,
-      });
-    } catch (error) {
-      errors.push(`${textNodes[i].label}：${errorMessage(error)}`);
-    }
-  }
-
-  const candidates = { cjkLatin: [], punctuationRuns: [] };
-  const resetRanges = [];
-  const seenFormattingRanges = new Map();
-  const masterSourceTexts = new Set();
-  let masterSourceFrameCount = 0;
-  for (const item of formattingNodes) {
-    if (!item.isMasterSpread) continue;
-    try {
-      const sourceRange = getNodeStoryText(item.node);
-      if (!sourceRange.text.length) continue;
-      masterSourceTexts.add(sourceRange.text);
-      masterSourceFrameCount++;
-      try {
-        masterSourceTexts.add(getStoryText(sourceRange.story));
-      } catch (error) {
-        errors.push(`${item.label}（母版页完整 Story）：${errorMessage(error)}`);
-      }
-    } catch (error) {
-      errors.push(`${item.label}（母版页源文本）：${errorMessage(error)}`);
-    }
-  }
-  let routedMasterInstances = 0;
-  let masterEditableInstances = 0;
-  let unmatchedMasterInstances = 0;
-  for (const item of formattingNodes) {
-    let nodeRange;
-    let selectionNode;
-    try {
-      nodeRange = getNodeStoryText(item.node);
-      selectionNode = item.node.storyInterface?.node || item.node;
-    } catch (error) {
-      errors.push(`${item.label}（文本范围）：${errorMessage(error)}`);
-      continue;
-    }
-    if (!nodeRange.text.length) continue;
-    if (!item.isMasterSpread) {
-      try {
-        if (isMasterEditableNode(item.node)) {
-          masterEditableInstances++;
-          const instanceText = getStoryText(nodeRange.story);
-          if (masterSourceTexts.has(nodeRange.text) ||
-              masterSourceTexts.has(instanceText)) {
-            routedMasterInstances++;
-            continue;
-          }
-          unmatchedMasterInstances++;
-        }
-      } catch (error) {
-        errors.push(`${item.label}（母版可编辑性识别）：${errorMessage(error)}`);
-      }
-    }
-    const identity = storyIdentity(nodeRange.story);
-    let nodeRanges = seenFormattingRanges.get(identity);
-    if (!nodeRanges) {
-      nodeRanges = new Map();
-      seenFormattingRanges.set(identity, nodeRanges);
-    }
-    let seenRanges = nodeRanges.get(nodeIdentity(selectionNode));
-    if (!seenRanges) {
-      seenRanges = new Set();
-      nodeRanges.set(nodeIdentity(selectionNode), seenRanges);
-    }
-    const rangeKey = `${nodeRange.begin}:${nodeRange.end}`;
-    if (seenRanges.has(rangeKey)) continue;
-    seenRanges.add(rangeKey);
-
-    resetRanges.push({
-      node: selectionNode,
-      story: nodeRange.story,
-      begin: nodeRange.begin,
-      end: nodeRange.end,
-      label: item.label,
-    });
-
-    try {
-      candidates.cjkLatin.push(
-        ...findCjkLatinBoundaries(selectionNode, nodeRange.text, nodeRange)
-          .map(target => ({ ...target, label: item.label }))
-      );
-    } catch (error) {
-      errors.push(`${item.label}（中西文字距）：${errorMessage(error)}`);
-    }
-    try {
-      candidates.punctuationRuns.push(
-        ...findConsecutivePunctuationTargets(selectionNode, nodeRange.text, nodeRange)
-          .map(target => ({ ...target, label: item.label }))
-      );
-    } catch (error) {
-      errors.push(`${item.label}（连续标点）：${errorMessage(error)}`);
-    }
-  }
-
-  const counts = {
-    cjkLatin: candidates.cjkLatin.length,
-    punctuationRuns: candidates.punctuationRuns.length,
-    punctuationSample: candidates.punctuationRuns[0]?.sample || '',
-    resetRanges: resetRanges.length,
-  };
-  const candidateSummary = `可选调整位置：中西文 ${counts.cjkLatin} 处、连续标点间距 ${counts.punctuationRuns} 处。`;
-  const masterRoutingNote = scanScope === 'document'
-    ? `母版源文本框 ${masterSourceFrameCount} 个；可编辑母版的页面实例 ${masterEditableInstances} 个，其中已路由 ${routedMasterInstances} 个、未匹配 ${unmatchedMasterInstances} 个。`
-    : '';
-  let formattingSummary = `${candidateSummary} 尚未应用。${masterRoutingNote}`;
-  const options = requestTypographyOptions(counts);
-  if (options) {
-    const resetTargets = [];
-    if (options.resetSpacing) {
-      collectResetTargets(resetTargets, resetRanges);
-    }
-
-    const targets = [...resetTargets];
-    const targetLookup = new Map();
-
-    if (options.applyKerning) {
-      if (!Number.isFinite(options.kerningAmount) ||
-          Math.abs(options.kerningAmount) > 0.5) {
-        errors.push('中西文 Kerning 字偶距增量必须在 -0.5 至 0.5 em 之间。');
-      } else if (options.kerningAmount !== 0) {
-        collectFormattingTargets(
-          targets, targetLookup, candidates.cjkLatin,
-          GlyphAttDoubleType.ManualKerning, options.kerningAmount
-        );
-      }
-    }
-
-    if (options.applyRuns) {
-      if (!Number.isFinite(options.runAmount) ||
-          options.runAmount < -1 || options.runAmount > 0) {
-        errors.push('连续标点间距增量必须在 -1 至 0 em 之间。');
-      } else if (options.runAmount !== 0) {
-        collectFormattingTargets(
-          targets, targetLookup, candidates.punctuationRuns,
-          GlyphAttDoubleType.CharacterSpacing, options.runAmount
-        );
-      }
-    }
-
-    if (targets.length) {
-      const applied = applyTypographyAdjustments(doc, targets, errors);
-      const applicationMode = applied.usedFallback
-        ? '已隔离重试（各成功对象/位置分别撤销）'
-        : '已应用（单次撤销）';
-      formattingSummary = applied.succeeded
-        ? options.resetSpacing
-          ? `${applicationMode}：已归零字距命令 ${applied.resetCommandCount} 项；另调整中西文 Kerning ${applied[GlyphAttDoubleType.ManualKerning]} 处、连续标点 Tracking ${applied[GlyphAttDoubleType.CharacterSpacing]} 处。${masterRoutingNote}`
-          : `${applicationMode}：中西文 Kerning 字偶距调整 ${applied[GlyphAttDoubleType.ManualKerning]} 处；连续标点 Tracking 挤压 ${applied[GlyphAttDoubleType.CharacterSpacing]} 处。${masterRoutingNote}`
-        : `排版调整未应用；请查看处理异常。${masterRoutingNote}`;
-    } else {
-      formattingSummary = `未应用排版调整。${candidateSummary}${masterRoutingNote}`;
-    }
-  }
-
-  console.log(formatReport(
-    findings, scannedStories, scannedChars, errors, formattingSummary, scanScope
-  ));
+  const { targets, matchCount, alreadyAppliedCount } =
+    collectRegexTargets(collection.nodes, errors);
+  const appliedCount = applyRegexTargets(doc, targets, errors);
+  const report = [
+    `Affinity CJK Regex Tracking ${VERSION}`,
+    `扫描文本对象：${collection.nodes.length}`,
+    `正则命中：${matchCount}`,
+    `已是 125‰：${alreadyAppliedCount}`,
+    `成功设置 Tracking：${appliedCount}`,
+    `处理异常：${errors.length}`,
+    ...errors.map(error => `• ${error}`),
+  ];
+  console.log(report.join('\n'));
 }
 
 main();
