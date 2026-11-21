@@ -7,6 +7,8 @@
 
 此脚本扫描文本，用正则查找中西文相邻字符和相邻标点，并把命中字符的 `CharacterSpacing`（Tracking）设为对应目标值。
 
+<div style="font-size: 36px; font-weight: 800;lang='zh-CN';">欢迎各位下载、自行改编使用，需要更多功能的话，欢迎给 <a mailto="motoko9032@gmail.com">我</a> 发信</div>
+
 ## 调整范围
 
 | 当前状态 | 调整范围 |
