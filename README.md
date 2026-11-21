@@ -8,7 +8,9 @@
 此脚本扫描文本，用正则查找中西文相邻字符和相邻标点，并把命中字符的 `CharacterSpacing`（Tracking）设为对应目标值。
 
 > **欢迎各位下载、自行改编使用，需要更多功能的话，欢迎给我（motoko9032@gmail.com）发信息**
+> 
 > **ダウンロードや改変・ご利用はご自由にどうぞ！もし追加したい機能などがあれば、お気軽に（motoko9032@gmail.com）までご連絡くださいね**
+> 
 > **Feel free to download, tweak, and use it however you like! If you need more features, just shoot me a message at (motoko9032@gmail.com)**
 
 ## 调整范围
